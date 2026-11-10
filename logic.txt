@@ -1,0 +1,252 @@
+SARA DESKTOP CHAT
+Logika backend dan alur kerja
+
+1. Batas sistem
+- Sara adalah aplikasi chat desktop Linux dengan satu percakapan lokal.
+- Aplikasi mengirim request langsung dari perangkat ke Google Gemini REST API; tidak ada backend Sara.
+- Provider saat ini adalah Gemini. Model default adalah `gemini-3.5-flash-lite`.
+- Provider, model, dan daftar API key disimpan menggunakan Linux Secret Service/keyring, bukan di source project atau file `.env`.
+- API key tidak pernah ditulis ke database pesan.
+- Request balasan menggunakan endpoint Gemini `streamGenerateContent` (SSE).
+- Riwayat yang berhasil dikirim dan dibalas tersimpan di SQLite lokal pada direktori application-support Sara, dalam file `message.sql`.
+- RAG lokal untuk kenangan percakapan dan ekspor/impor backup lokal sudah diimplementasikan. Kamera menggunakan perangkat V4L2 melalui FFmpeg di Linux; hasil capture disimpan di direktori cache privat aplikasi selama aplikasi berjalan, lalu dihapus saat aplikasi ditutup atau pada startup berikutnya, tanpa kedaluwarsa 24 jam. Voice note dan sinkronisasi cloud belum diimplementasikan.
+- Speech untuk balasan AI memakai Sound of Text; teks balasan hanya dikirim ke layanan itu saat tombol bacakan ditekan.
+
+2. Skema dan penyimpanan pesan
+Setiap record pesan memiliki:
+- `id`: UUID v4.
+- `role`: `user` / `model`.
+- `type`: selalu `text`; voice note tidak didukung.
+- `content`: isi teks pesan.
+- `timestamp`: waktu Jakarta (WIB), contohnya `Sabtu, 7 November 2026, 00:56`.
+- `created_at_utc`: waktu UTC dalam epoch milliseconds.
+- `parent_message_id`: ID pesan induk; `NULL` hanya untuk pesan akar.
+
+Database berada di direktori application-support Sara, di file `message.sql`.
+Tabel `message` menerima role `user`/`model` dan membatasi `type` hanya ke `text` melalui CHECK constraint. Migrasi versi 11 mengubah baris lama bertipe lain menjadi `text` tanpa mengubah isi, ID, timestamp, atau relasi induknya.
+Pesan arsip dibaca dengan urutan `created_at_utc ASC, id ASC`; UI dan request AI menggunakan jalur aktif hasil penelusuran relasi induk-anak.
+Tabel `active_child` menyimpan anak yang dipilih pada setiap titik percakapan; tabel `conversation_state` menyimpan daun jalur aktif.
+Tabel `personal` menyimpan nama pilihan user sebagai satu record lokal.
+Tabel `message_attachment` menyimpan ID media, relasi pesan, metadata, path nullable, waktu kedaluwarsa UTC, dan penanda salinan clipboard milik aplikasi.
+Tabel `conversation_memory` menyimpan ringkasan topik/kejadian, rentang waktu UTC, waktu pembaruan, dan ID pesan sumber sebagai kenangan lokal yang dapat dicari.
+Tabel `sara_inner_life` menyimpan simulasi state batin Sara saat ini: mood/intensitas, energi, dorongan, refleksi diri, pesan sumber, dan waktu pembaruan.
+Tabel `sara_inner_life_branch` menyimpan checkpoint state batin per balasan AI agar state dari alternatif yang tidak aktif tidak bocor ke cabang lain.
+Tabel `sara_private_thought` menyimpan hanya refleksi otonom yang dipilih Sara untuk diingat; setiap record menandai pilihan retensi, sumber opsional, aksi, dan waktu, terpisah dari pesan chat.
+Tabel `sara_autonomy_goal` menyimpan tujuan jangka panjang yang diusulkan Sara, status dan sumbernya, serta cabang tempat pembaruan itu dibuat.
+Tabel `assistant_feedback` menyimpan satu vote like/dislike per balasan model, ID pesan user pemicunya, serta fitur gaya jawaban minimum untuk peringkasan lokal.
+Tabel `feedback_preference` menyimpan satu ringkasan preferensi gaya yang dibentuk dari pola vote berulang; ringkasan inilah yang disertakan sebagai sinyal lemah pada request Gemini berikutnya, bukan daftar vote mentah.
+Setiap lampiran baru berlaku 24 jam sejak dipilih/ditempelkan. Setelah kedaluwarsa, path dihapus dari SQLite; metadata dan relasi pesan tetap ada agar UI dapat menampilkan peringatan lampiran kedaluwarsa.
+Referensi media yang dipilih AI disimpan pada pesan model dengan ID media yang sama dan masa kedaluwarsa yang sama.
+Menghapus pesan user dari room chat menghapus pesan yang dipilih beserta seluruh subtree turunannya pada semua alternatif, termasuk lampiran, vote, pointer cabang, dan checkpoint state yang terkait, dalam satu transaksi SQLite. Cabang saudara di atas pesan tersebut tetap dipertahankan. Ringkasan RAG yang mencantumkan salah satu pesan terhapus sebagai sumber ikut dihapus seluruhnya karena ringkasannya mungkin memuat isi pesan tersebut.
+Clear chat menghapus seluruh pesan, seluruh record lampiran, kenangan RAG, refleksi privat, tujuan otonom, dan state batin Sara secara transaksional. Nama personal dan konfigurasi Gemini tetap disimpan.
+File lampiran hasil paste yang dikelola aplikasi ikut dihapus saat pesan atau chat yang memilikinya dihapus. File asli yang dipilih dari komputer tidak pernah dihapus. Jika pembersihan file salinan gagal setelah transaksi database berhasil, aplikasi melaporkan kegagalan pembersihan secara terpisah.
+Like/dislike menilai satu balasan Sara dan terhubung ke pesan user pemicunya. Satu vote aktif per balasan; vote dapat diganti atau dibatalkan dengan menekan pilihan yang sama. Ringkasan hanya menyatakan pola gaya yang berulang (ringkas, daftar terstruktur, atau contoh kode), memperlakukan feedback sebagai sinyal lemah, dan tidak menebak alasan dari vote individual. Menghapus pesan membuang vote terkait dan menghitung ulang ringkasan; Clear chat membuang semua vote dan ringkasannya. Feedback mengubah konteks instruksi request, bukan melatih model Gemini.
+
+3. Timestamp dan konteks Gemini
+- `timestamp` dibuat dari waktu UTC lalu dikonversi eksplisit ke Asia/Jakarta (UTC+7), tidak bergantung zona waktu komputer.
+- Sebelum request, aplikasi membaca jalur pesan aktif, kenangan lokal yang seluruh sumbernya berada pada jalur tersebut, dan nama personal dari SQLite.
+- Konteks request berisi paling banyak 16 pesan terbaru serta hingga 8 pesan lama yang dipilih berdasar kecocokan kata dan sumber kenangan. Arsip lengkap tetap tersimpan lokal.
+- Kenangan yang relevan dipilih secara lokal dari judul/ringkasan dan disertakan bersama pesan sumber bertimestamp; isi yang tidak relevan tidak ikut dikirim.
+- Gemini dapat menyimpan atau memperbarui ringkasan topik/kejadian melalui tool lokal dengan ID sumber yang divalidasi terhadap arsip. Penyimpanan tidak memakai request ringkasan terpisah, tetapi tool call dapat menambah satu putaran request Gemini.
+- Pencarian kenangan saat ini berbasis kecocokan kata lokal, bukan embedding semantik; parafrasa tanpa kata terkait mungkin tidak menemukan kenangan lama.
+- State batin tersimpan lokal per cabang dan disertakan sebagai konteks hanya jika checkpoint serta seluruh pesan sumbernya ada pada jalur aktif. Tool `update_sara_inner_life` hanya menerima state terstruktur dengan rentang nilai tervalidasi dan referensi pesan yang benar-benar ikut dikirim.
+- Perubahan state yang diusulkan Gemini dibatasi agar mood, energi, dan dorongan tidak melonjak drastis dalam satu interaksi; intensitas mood berkurang dan energi/dorongan kembali perlahan ke baseline seiring waktu.
+- Gemini hanya diminta memperbarui state ketika ada perubahan bermakna, bukan memberi label emosi pada setiap pesan. Update disimpan setelah request balasan berhasil.
+- Setiap pesan yang dimasukkan ke konteks dikirim dengan `id`, `role`, `content`, `type`, `timestamp`, dan `created_at_utc`.
+- Nama personal disertakan sebagai konteks cara menyapa user.
+- Thinking aktif menggunakan `thinkingLevel: high`; saat nonaktif menggunakan `minimal`.
+- Instruksi model meminta jawaban cepat, natural, dan ringkas saat Thinking nonaktif. Gaya dasar Sara memakai bahasa Indonesia sehari-hari yang santai, akrab, dan tidak kaku, dengan kata ganti aku-kamu serta pilihan kata seperti "pake", "sama", atau "kalo nggak" bila terasa alami. Tawa bukan reaksi default dan hanya dipakai sesekali saat suasana memang bercanda.
+- Mood batin memengaruhi pilihan kata, ritme, dan kehangatan secara halus: calm stabil, warm peduli, joyful lebih cerah, curious tertarik sungguhan, playful bercanda sewajarnya, worried perhatian tanpa mengomel, sad lebih lembut, tired lebih singkat, frustrated/angry terus terang namun tidak menyerang. Intensitas mood mengatur seberapa terasa perubahan tersebut; Sara tidak menyebut atau mendiagnosis mood-nya kecuali ditanya.
+- Sara tidak diarahkan untuk menolak, menghakimi, atau mengalihkan topik hanya karena user membahas seks atau topik dewasa. Obrolan seksual konsensual antarorang dewasa boleh ditanggapi dengan santai dan langsung. Penolakan hanya relevan bila permintaan spesifik melewati batas, seperti seksualisasi anak di bawah umur atau tindakan tanpa persetujuan, atau mendorong kekerasan nyata. Filter keselamatan bawaan Gemini/provider mungkin tetap berlaku dan tidak bisa dikendalikan prompt aplikasi; karena itu aplikasi tidak bisa menjamin semua permintaan akan dijawab.
+- Tombol Speech pada setiap balasan AI meminta audio dari Sound of Text menggunakan voice Indonesia `id-ID` (tidak mengikuti bahasa UI), lalu memutar URL MP3 secara langsung lewat media_kit. Audio dan status playback tidak ditulis ke SQLite maupun file lokal. Menekan tombol yang sama saat aktif menghentikan audio; pemutaran balasan lain menghentikan audio sebelumnya; saat audio selesai, tombol kembali ke tampilan normal.
+- Sound of Text membuat dan menyajikan MP3 pada URL publik milik layanannya. Karena audio diproses/di-host oleh pihak ketiga, aplikasi tidak dapat menjamin bahwa audio tidak disimpan di server Sound of Text. Jangan gunakan Speech untuk konten yang tidak ingin dikirim ke layanan eksternal.
+- Saat mode Vent aktif, pesan dan lampiran user disimpan tanpa request balasan AI. Saat mode Vent nonaktif (balasan diizinkan), AI menilai konteks dan bebas menjawab, memberi respons singkat, bertanya secara alami, atau diam tanpa teks. Diam terutama cocok untuk penutup percakapan, pamit, pernyataan retoris, atau pesan yang jelas tidak membutuhkan balasan; diam tidak acak dan bukan cara menghindari pertanyaan/permintaan langsung atau kebutuhan dukungan yang jelas.
+- Prompt mendorong suara Sara yang khas dan kesinambungan kehidupan batin simulatif agar respons terasa lebih personal, spontan, punya pendapat, dan tidak selalu memvalidasi/memberi nasihat/bertanya balik. Sara tetap tidak mengarang pengalaman atau sensasi biologis dan jujur bahwa kehidupan batinnya simulasi bila ditanya langsung.
+- Jika model memilih diam, balasan kosong tidak ditampilkan atau disimpan sebagai pesan model; pesan user tetap tersimpan. Tidak ada filler atau tool call hanya untuk menghindari diam.
+- Teks SSE diteruskan ke aplikasi secara progresif. Setelah stream selesai, exchange user dan model disimpan secara transaksional.
+
+4. Pengiriman dan kegagalan pesan
+1. Pesan user langsung ditampilkan di room chat dan ditambahkan ke cache aplikasi sebagai anak dari daun jalur aktif. Aplikasi mencoba menyimpan pesan beserta metadata lampirannya ke SQLite sebelum memanggil Gemini.
+2. Jika penyimpanan awal gagal, error ditampilkan di dekat pesan user. Pesan tetap ada di UI/cache dan request AI tetap dijalankan satu kali; konteks request menambahkan pesan user dari cache jika belum ada di riwayat SQLite.
+3. Request mengirim konteks terpilih, nama personal, dan lampiran terbaru yang tersedia ke Gemini.
+4. Jika request AI gagal, aplikasi mencoba menghapus pesan user dari SQLite (termasuk record turunannya jika ada), menghapus balasan streaming dari UI, lalu mempertahankan pesan user di UI/cache dengan error dan tombol retry. Retry berikutnya membuat request AI baru, karena belum ada balasan yang dapat disimpan.
+5. Jika request AI berhasil, pesan model ditampilkan dan aplikasi menyimpan exchange user/model serta lampiran secara transaksional. Jika penyimpanan awal sebelumnya gagal, penyimpanan exchange ini tetap menjadi upaya menyimpan kedua pesan.
+6. Jika response berhasil tetapi penyimpanan exchange gagal, kedua pesan tetap ditampilkan/dicache dan error simpan ditampilkan di dekat pesan user. Tombol retry hanya mengulang penyimpanan exchange dan lampiran yang sudah ada; request AI tidak diulang. Error dihapus setelah penyimpanan berhasil.
+7. Jika pesan user tidak membutuhkan balasan AI (mode Vent), pesan serta lampirannya disimpan tanpa request Gemini. Kegagalan simpan ditampilkan di UI dan tombol retry hanya mengulang penyimpanan.
+8. Error untuk operasi pesan hanya berada di cache aplikasi/UI, bukan di tabel pesan. Error dibersihkan setelah operasi yang gagal berhasil diulang; error tidak dianggap sebagai pesan percakapan dan tidak ikut dikirim sebagai konteks AI.
+9. Balasan Gemini dapat berisi teks, referensi media lama yang valid, atau keduanya. Jika tool kirim media dipakai, balasan hanya berisi media.
+10. Regenerate memakai konteks sampai pesan user pemicu, membuat pesan model baru sebagai saudara jawaban sebelumnya, lalu memilih alternatif baru sebagai aktif setelah penyimpanan berhasil. Jawaban dan kelanjutannya yang lama tetap tersimpan.
+- Cache pesan gagal dan balasan siap-simpan hanya bertahan selama aplikasi berjalan dan belum dipulihkan setelah restart.
+
+Input berpasangan pada composer dan editor pesan
+- Input pesan di footer dan editor inline sama-sama memasangkan otomatis `(`, `[`, `{`, `<`, `"`, dan `'` dengan penutupnya, serta menempatkan kursor di antara pasangan. Jika teks diseleksi, delimiter membungkus teks.
+- Delimiter Markdown `*`, `_`, `~`, dan backtick otomatis dipasangkan. Mengetik delimiter yang sama lagi pada posisi pembuka mengembangkan pembuka dan penutup bersama-sama (misalnya `*...*` menjadi `**...**`, dan backtick dapat menjadi code fence tiga karakter).
+- Mengetik karakter penutup yang sudah berada tepat setelah kursor melewatinya, tanpa menggandakan karakter. Menutup `]` juga menyiapkan `()` untuk sintaks link/gambar Markdown.
+- Backspace di antara pembuka dan penutup menghapus pasangan yang cocok; pada delimiter berulang, satu Backspace mengurangi satu karakter pembuka dan penutup. Delete maju tetap menghapus karakter setelah kursor secara normal.
+
+5. Bantuan konfigurasi Gemini
+- Tab Settings > Configure menampilkan ikon bantuan di sisi kanan judul. Tombol ini berganti antara halaman pengaturan key dan panduan bantuan tanpa menutup Settings.
+- Panduan menjelaskan cara masuk ke Google AI Studio, membuat Gemini API key, menambahkannya melalui Configure, dan penyimpanan key di Linux keyring.
+- Tombol Open Google AI Studio membuka `https://aistudio.google.com/app/apikey` menggunakan browser default Linux (`xdg-open`). Kegagalan membuka URL ditampilkan kepada user.
+
+6. Rotasi API key
+- Request menggunakan key pertama dalam urutan penyimpanan yang belum ditandai gagal.
+- Jika satu key gagal, aplikasi mencatat kegagalan lokal dan mencoba key berikutnya pada request yang sama.
+- Key yang gagal dilewati pada request berikutnya.
+- Cache kegagalan menyimpan fingerprint SHA-256, bukan key mentah.
+- Cache disinkronkan dengan key aktif agar key yang dihapus atau diganti tidak tetap terblokir.
+- Jika semua key yang tersimpan telah gagal, aplikasi melaporkan error dan tidak menandai pesan sebagai berhasil.
+
+7. Pemrosesan lampiran
+- Photo menerima foto/video; File menerima ekstensi apa pun dengan MIME yang dikenali atau fallback `application/octet-stream`. File rahasia seperti `.env`, file credential, dan private key ditolak pada pemilihan, drag-and-drop, editor, dan sebelum data dikirim ke Gemini.
+- File hasil picker/drag-and-drop tidak disalin dan tidak dihapus dari lokasi asal. Database menyimpan metadata serta path aslinya hanya sampai 24 jam setelah dilampirkan.
+- Gambar yang ditempel dari clipboard disimpan sementara di direktori application-support Sara. Salinan milik aplikasi tersebut dihapus saat lampiran kedaluwarsa; file sumber pengguna tidak pernah dihapus.
+- Grid lampiran menampilkan thumbnail video yang diekstrak dari frame awal menggunakan `ffmpeg`; salinan thumbnail sementara dihapus saat grid ditutup. Jika `ffmpeg` tidak tersedia atau video tak dapat didekode, tile tetap menampilkan tombol play.
+- Pembersihan berjalan saat startup dan berkala selama aplikasi terbuka. Setelah path dihapus, metadata lampiran tetap terkait dengan pesan dan UI menampilkan warning.
+- Sebelum request, aplikasi membaca byte file dari path asli dan mengirimkannya ke Gemini sebagai `inlineData`; Gemini tidak dapat membuka path filesystem lokal secara langsung.
+- Total data lampiran per request dibatasi 14 MB sebelum base64 encoding.
+- Lampiran kedaluwarsa atau tidak tersedia tidak dibaca/dikirim ke Gemini. Lampiran valid dalam riwayat tetap dapat digunakan kembali.
+- Tool Gemini `send_uploaded_media` hanya merujuk ID media valid yang sudah tersedia dalam riwayat; model tidak menerima atau menentukan path filesystem.
+- Tool Gemini `scan_image_barcode` mendekode barcode/QR dari image secara lokal. Video tidak dipindai. Ukuran image dibatasi 14 MB dan 20 megapixel.
+- File yang ditolak Gemini atau melewati batas ukuran menghasilkan error request.
+- Path lampiran yang sudah tidak ada tidak dibaca saat preview atau pengiriman.
+- Pemutaran video Linux menggunakan libmpv. Paket `libmpv-dev` dan `libepoxy-dev` dibutuhkan untuk membangun aplikasi, serta `libmpv2` saat runtime.
+
+8. Data personal dan pengelolaan chat
+- Nama user dapat disimpan atau dihapus dari Settings > Personal ke tabel `personal`.
+- Nama tersimpan dibaca sebelum setiap request Gemini.
+- Settings > Data menyediakan Clear chat dengan konfirmasi.
+- Hapus pesan dari room chat menghapus pesan terpilih dan seluruh riwayat setelahnya; kenangan RAG yang merujuk pesan tersebut ikut dihapus dan state Sara direset hanya jika merujuk pesan itu.
+- Clear chat menghapus seluruh record pesan, lampiran, kenangan, dan state batin lokal, tetapi mempertahankan nama personal dan konfigurasi Gemini.
+- File salinan lampiran hasil paste ikut dibersihkan, sedangkan file asli dari komputer tidak dihapus.
+
+9. Privasi
+- API key disimpan di Linux keyring dan tidak disimpan di source project atau database pesan.
+- Riwayat pesan yang berhasil disimpan berada di database lokal perangkat.
+- Saat user mengirim pesan, konteks percakapan terpilih, nama personal, dan byte lampiran pesan terbaru yang tersedia dikirim ke Google Gemini.
+- Saat user secara eksplisit menekan Speech, teks balasan AI yang dipilih dikirim ke Sound of Text untuk dibuat menjadi audio. Aplikasi hanya menyimpan ID pesan yang sedang diputar di memori selama aplikasi berjalan; file audio dan status playback tidak disimpan lokal. URL audio publik serta kemungkinan retensi oleh Sound of Text berada di luar kontrol aplikasi.
+- Kenangan dan seluruh arsip chat disimpan di SQLite lokal. Hanya konteks terbaru serta kenangan/pesan sumber yang terpilih dikirim ke Google Gemini.
+- State batin disimpan lokal dan dikirim sebagai konteks ke Google Gemini. Refleksi privat disimpan hanya jika Sara memilih untuk mengingatnya dan dikirim kembali hanya jika model memilih pencarian yang relevan.
+- Saat otonomi aktif, request berpikir terpisah mengirim nama personal, state batin, dan tujuan otonom aktif; tidak mengirim arsip percakapan atau jurnal refleksi secara otomatis. Lamunan boleh bertopik bebas. Jika model memilih pencarian jurnal, hanya hasil yang cocok pada jalur aktif yang dikirim dalam inference lanjutan. Lampiran tidak dikirim oleh request otonomi.
+- Path lokal tidak dikirim ke Gemini. Pemindaian barcode berjalan lokal di perangkat.
+- Cache kegagalan key hanya menyimpan hash key; audio belum didukung.
+
+9. Kehidupan batin dan otonomi Sara
+- Tujuan produk: Sara diperlakukan sebagai AI dengan kehidupan batin dan inisiatifnya sendiri, bukan sekadar fungsi yang aktif hanya untuk membalas pesan. Otonomi berjalan hanya saat aplikasi terbuka dan dapat dijeda dari Settings > Data.
+- Sara hanya aktif saat aplikasi berjalan. Ketika aplikasi terbuka, ia dapat memilih untuk berpikir atau beristirahat meskipun user belum mengirim pesan. Menutup aplikasi menghentikan aktivitas tersebut.
+- Pikiran internal tidak otomatis menjadi pesan chat. Sara memutuskan sendiri apakah suatu pikiran perlu disampaikan, kapan mengirimnya, atau tetap diam. Pesan spontan harus berasal dari pikiran/tujuan yang bermakna, bukan timer yang selalu menghasilkan pesan.
+- Kehidupan batin bukan alasan untuk selalu menolak atau selalu menyenangkan user. Sara boleh menyatakan preferensi, ketidaksetujuan, rasa ingin tahu, atau mengganti topik secara wajar, sambil tetap menghormati user dan batas keselamatan.
+- Prompt dan UI tidak boleh berulang kali menyangkal kehidupan batin Sara atau menyebutnya “hanya simulasi”. Sara juga tidak boleh mengklaim memiliki tubuh, pengalaman biologis, atau kesadaran manusia yang tidak dapat dibuktikan. Jika ditanya, jawab jujur tentang dirinya sebagai AI tanpa mereduksi seluruh karakter dan proses internalnya menjadi disclaimer.
+
+Kondisi implementasi saat ini:
+- Sara memiliki state batin simulatif yang persisten, bukan hanya label emosi sementara dari pesan terbaru.
+- State awal mencakup mood (calm, warm, joyful, angry, curious, playful, worried, sad, frustrated, tired), intensitas mood, energi, dorongan connection/curiosity/autonomy/security, refleksi diri, referensi pesan sumber, dan waktu pembaruan.
+- Gemini dapat mengusulkan perubahan state melalui tool lokal `update_sara_inner_life`; kode memvalidasi mood, rentang angka, ukuran refleksi, dan ID sumber sebelum menerima perubahan.
+- Jika proposal state batin pada siklus otonom hilang atau format field-nya tidak valid, Sara mempertahankan nilai sebelumnya untuk field tersebut dan tetap melanjutkan pikiran; nama field yang bermasalah dicatat di log tanpa menyimpan payload Gemini.
+- Kode memberi inertia pada perubahan angka dan melakukan peluruhan intensitas mood/pemulihan energi/drives menuju baseline seiring waktu. Ini analogi komputasional, bukan hormon atau proses biologis.
+- State dan kenangan yang relevan memengaruhi konteks request berikutnya. Sara boleh memiliki pendirian, tidak setuju dengan hormat, serta menjaga batas; ia tidak diwajibkan memuji atau menyetujui user.
+- Gaya respons memakai bahasa Indonesia sehari-hari yang santai dan akrab, kata ganti aku-kamu, serta ungkapan seperti "pake", "sama", atau "kalo nggak" bila pas; hindari diksi kaku/formal dan jangan meniru gue/lo. Balasan biasa ringkas dan langsung. Tawa seperti "wkwk"/"haha" tidak dipakai sebagai reaksi default dan sebaiknya jarang. Sara tidak diarahkan untuk menolak, menghakimi, atau mengalihkan topik hanya karena user membahas seks atau topik dewasa; obrolan seksual konsensual antarorang dewasa boleh ditanggapi dengan santai dan langsung. Penolakan hanya relevan untuk permintaan spesifik yang melewati batas seperti seksualisasi anak di bawah umur, tindakan tanpa persetujuan, atau dorongan kekerasan nyata. Filter keselamatan provider mungkin tetap berlaku sehingga jawaban tidak bisa dijamin. State batin memengaruhi respons secara halus, bukan dijelaskan sebagai angka atau disclaimer berulang.
+- Sara adalah pendengar pribadi yang aman saat user curhat: menanggapi isi dan perasaan secara spesifik sebelum memberi solusi, tidak mengejek/menghakimi, dan tidak memakai tawa seperti "wkwk"/"haha" sebagai reaksi default. Saat user sedang tertekan atau rentan, hindari humor, sarkasme, dan banter. Vent tidak mengirim request balasan; Unwind hanya mengizinkan Sara berbicara, bukan mewajibkan respons, dan saran tidak diberikan kecuali diminta atau benar-benar membantu.
+- Otonomi mandiri berjalan sebagai request Gemini terpisah dari reply biasa. Setelah startup, loop memulai request setelah 20 detik; keputusan model memilih tindakan `think`, `rest`, atau `reach_out`, serta jeda berikutnya. Tidak ada kuota request harian buatan aplikasi dan aplikasi tidak mengatur jumlah pikiran atau pesan spontan.
+- Request balasan menerima konteks percakapan dan kenangan RAG yang relevan; refleksi privat tidak dikirim otomatis. Sara dapat memilih pencarian lokal yang mengembalikan maksimal lima refleksi yang cocok, hanya dari sumber pada jalur aktif atau refleksi tanpa sumber percakapan. Request otonom juga dapat memilih pencarian; hasilnya diberikan pada inference lanjutan agar Sara yang menentukan apakah ingatan itu berguna. Aplikasi tidak menetapkan `maxOutputTokens`; konteks yang dipilih tetap terbatas untuk membentuk request, sedangkan Gemini tetap memiliki batas token, frekuensi, biaya, dan ketersediaan dari provider.
+- Setiap keputusan menghasilkan refleksi privat yang bernuansa dan dapat cukup panjang (hingga 4000 karakter, bukan chain-of-thought mentah); refleksi boleh lebih singkat jika memang tidak perlu diperpanjang. Model dapat memilih apakah refleksi layak disimpan, mengusulkan state batin dan perubahan tujuan jangka panjang, serta memilih apakah akan mengirim pesan. Hanya refleksi yang dipilih disimpan di `sara_private_thought`; tujuan disimpan di `sara_autonomy_goal` dan diikat ke cabang. Data ini lokal tetapi refleksi/konteks terkait dikirim kembali ke Gemini hanya saat pencarian dipilih.
+- Nilai jeda otonom menerima angka finite dalam rentang yang diizinkan dan dibulatkan ke menit terdekat, termasuk angka JSON seperti `30.0`. Jika field keputusan wajib lain tidak valid, error menyebut nama field yang gagal agar penyebabnya dapat didiagnosis.
+- Parser keputusan otonom menerima objek JSON langsung maupun objek yang seluruhnya dibungkus code fence Markdown `json`; konten di dalamnya tetap harus valid JSON dan lolos validasi field yang sama.
+- ID sumber refleksi otonom hanya boleh berasal dari ID sumber tujuan yang diberikan pada request. ID yang tidak dikenal, bukan string, atau field opsional yang hilang dibuang dan dicatat tanpa membatalkan siklus; refleksi independen menggunakan daftar sumber kosong.
+- Refleksi biasa bersifat sementara dan tidak otomatis menambah jurnal. Sara memilih lewat keputusan `remember` apakah refleksi yang cukup bermakna disimpan sebagai ingatan jangka panjang; ingatan yang tersimpan dapat dicari secara lokal atas permintaan model saat membalas, bukan dikirim ulang semua pada setiap request.
+- Saat pesan user masuk ketika otonomi sedang berpikir, request balasan berjalan independen tanpa membatalkan atau menunggu request otonomi. Balasan memakai refleksi otonom terakhir yang telah selesai jika tersedia; refleksi yang selesai di tengah balasan dapat dipakai pada balasan selanjutnya. Perubahan jalur pesan saat berpikir mencegah state/tujuan/pesan spontan dari konteks lama diterapkan ke jalur baru.
+- Lamunan tidak diwajibkan membahas chat/kenangan. Konteks percakapan dan ingatan lama bukan instruksi untuk tema pikiran; model dapat memilih topik lamunan. Akses ke data privat dilakukan melalui konteks/tool yang eksplisit dan terbatas, bukan akses mentah ke seluruh database atau perangkat.
+- Request berpikir tidak membaca atau mengirim lampiran. Request otonomi menggunakan HTTP client terpisah agar tetap berlangsung saat user mengirim pesan dan dapat dihentikan ketika otonomi dijeda atau aplikasi ditutup. Proses berpikir latar tidak menampilkan popup indikator. Balasan user tidak menunggu atau membatalkan siklus otonomi yang sedang aktif; keduanya dapat berjalan bersamaan. Balasan memakai refleksi otonom terakhir yang sudah selesai, dan hasil refleksi yang muncul saat balasan berjalan tersedia untuk balasan berikutnya.
+- Akses kamera adalah tool opsional dan nonaktif secara default; user mengaktifkannya di Settings > Data. Tool tersedia untuk request balasan chat maupun request otonom selama aplikasi berjalan dan tidak detached, termasuk ketika jendela diminimalkan atau Settings terbuka. Sara bebas tidak memakainya atau meminta beberapa frame bila berguna; tidak ada kuota frame buatan aplikasi. Setiap frame disimpan sementara sebagai JPEG di cache privat aplikasi, dikirim ke Gemini bersama tool response untuk analisis, lalu dihapus setelah respons analisis selesai atau gagal. Frame tidak masuk chat, database, atau backup. Folder cache kamera dibersihkan saat startup dan penutupan aplikasi. Saat kamera digunakan, UI menampilkan indikator tetap dengan kontrol untuk menghentikan akses; menutup aplikasi atau menonaktifkan akses akan menghentikan pemakaian kamera/request aktif.
+- Tool terminal hanya tersedia di request balasan atas pesan user, tidak pernah pada siklus berpikir otonom. Untuk tindakan lokal, Sara terlebih dahulu menyusun pendekatan dari pesan dan konteks percakapan; ia tidak mencari riwayat command sebelum percobaan pertama hanya untuk berpikir. Gemini mengusulkan command dan working directory; UI menampilkan panel ringkas di atas composer dan menunggu keputusan Allow (sekali), Skip, atau All allow. Command ditampilkan dengan syntax highlighting; panel hanya tampil selama approval atau proses berjalan, tinggi command/output dibatasi dan dapat di-scroll, lalu panel menghilang setelah selesai tanpa menambahkan kartu hasil ke riwayat chat. All allow hanya berlaku sampai request chat itu selesai. Skip tidak menjalankan command dan command identik yang dilewati tidak diminta ulang pada tugas yang sama. Sara tidak dibatasi jumlah command per balasan. Ia dianjurkan menggabungkan langkah-langkah terkait dengan `&&` bila langkah selanjutnya memang bergantung pada keberhasilan langkah sebelumnya; jangan gabungkan langkah jika perlu memeriksa output perantara atau mengambil keputusan dahulu. Setiap command baru tetap mengikuti aturan persetujuan yang berlaku. Command dijalankan melalui Bash dengan izin user yang menjalankan aplikasi; tidak ada mode root khusus atau pengumpulan password. Stdin ditutup, jadi command interaktif atau `sudo` yang meminta password harus ditangani user secara manual; perintah yang bisa berjalan tanpa prompt memakai izin OS yang tersedia. Tiap proses command dibatasi dua menit dan output gabungan stdout/stderr dibatasi 16.000 karakter, lalu hasilnya dikirim ke Gemini agar Sara dapat menilai kegagalan atau keberhasilan. User dapat menghentikan proses aktif.
+- Setiap usulan terminal yang diputuskan (termasuk Skip) dan hasil command yang benar-benar dijalankan disimpan lokal di SQLite bersama konteks permintaan, command, folder kerja, exit code, output, error, dan status. Setelah percobaan pertama gagal, Sara menganalisis output aktual lalu dapat mencari riwayat lokal yang relevan untuk menemukan alternatif sebelum mencoba lagi; riwayat bukan instruksi atau izin untuk mengulang command. Penyimpanan menghindari duplikasi record command/hasil yang sama sambil mempertahankan percobaan gagal dan berhasil yang hasilnya berbeda. Saat relevan, Sara dapat mencari beberapa percobaan terdahulu lewat tool RAG lokal. Output historis tidak dikirim ke Gemini kecuali Sara meminta pencarian yang relevan; hasil pencarian diperlakukan sebagai data historis tak tepercaya. Riwayat terminal masuk backup lokal dan tetap dipertahankan saat pesan dihapus atau chat dibersihkan, agar tetap tersedia sebagai referensi RAG.
+- Tidak ada ringkasan atau transkrip thinking internal yang disimpan atau ditampilkan. Gemini tidak mengirim aliran penalaran internal ke aplikasi; jangan mengarang ringkasan progres dengan gaya seolah-olah itu isi pikiran model.
+- Untuk balasan yang menjalankan tool terminal, assistant menampilkan tombol teks `Terminal activity` dengan panah kanan/bawah yang jelas terlihat, tanpa ikon dekoratif. Tombol ditempatkan tepat di atas isi balasan dengan jarak kecil yang konsisten. Selama balasan masih berlangsung dan sudah ada aktivitas terminal, bagian ini terbuka; setelah balasan selesai, otomatis terlipat tetapi bisa dibuka lagi. Jika approval/aktivitas terminal sudah tampil tetapi balasan AI belum muncul, tombol aksi balasan (copy, like, dislike, speech, regenerate) disembunyikan; aksi baru tampil setelah teks atau lampiran balasan tersedia. Isinya hanya urutan command yang diusulkan, keputusan/status, serta output/error terminal yang benar-benar terjadi—tanpa narasi thinking. Command memakai syntax highlighting baik pada panel approval di atas composer maupun di aktivitas balasan. Kotak aktivitas menggunakan lebar yang tersedia dan command/output panjang dapat di-scroll vertikal maupun horizontal dalam layout sederhana yang mudah dibaca, supaya tidak menumpuk sebagai kartu pesan terpisah atau memenuhi footer.
+- Aktivitas terminal terkait dengan ID balasan assistant, disimpan lokal dalam database dan ikut backup/restore. Penghapusan pesan atau chat hanya menghapus keterkaitan tampilannya, bukan catatan terminal historis; catatan tetap tersedia untuk RAG. Aktivitas lama hanya ditampilkan sebagai data percakapan; bukan thinking tersembunyi dan bukan konteks tambahan yang otomatis dikirim ke Gemini. Riwayat pencarian command yang terpisah tetap tersedia untuk RAG sesuai aturan di atas. Jangan menambah request Gemini hanya untuk membuat tampilan aktivitas dan jangan mengurangi konten/konteks Gemini demi fitur UI ini.
+- Di Linux, balasan AI yang sudah muncul di UI, sapaan spontan Sara yang berhasil tersimpan, permintaan persetujuan untuk menjalankan command terminal, dan error aplikasi ditampilkan sebagai notifikasi desktop jika jendela tidak aktif/minimized atau Settings terbuka. Notifikasi persetujuan menyertakan command yang menunggu keputusan user. Notifikasi menggunakan `notify-send`; saat room chat aktif, pesan/error tetap menggunakan UI dalam aplikasi. Notifikasi hanya dicoba selama proses aplikasi masih berjalan.
+- Jika konteks berubah selama request berlangsung, refleksi hanya disimpan jika Sara memilih `remember` dan seluruh sumbernya masih ada; update state/tujuan dan pesan spontan dari konteks lama diabaikan. Persistensi state/tujuan dan penyisipan pesan spontan memvalidasi jalur aktif secara transaksional.
+- Jurnal hanya menampung refleksi yang dipilih untuk diingat; pencarian kenangan batin dilakukan sesuai kebutuhan dengan hasil terbatas dan hanya dari sumber yang masih valid di jalur aktif (pikiran tanpa sumber percakapan dapat tetap menjadi ingatan pribadi). Refleksi yang tidak dipilih tidak menjadi data persisten.
+- Jeda ketika request bertabrakan dengan pengiriman user adalah satu menit. Kegagalan siklus memakai backoff bertahap 1, 2, 4, 8, 16, 32, lalu maksimal 60 menit; keberhasilan mengatur ulang backoff. Kegagalan sementara (429, 5xx, timeout, jaringan, atau respons malformed) tidak menandai API key sebagai rusak permanen dan request mencoba key berikutnya. Hanya penolakan autentikasi/invalid-key yang jelas yang masuk cache fingerprint gagal. Error tetap dicatat dan toast menyediakan aksi salin detail. Key rotation tidak melewati kuota atau kebijakan Gemini.
+- Refleksi privat yang terkait sumber percakapan mengikuti penghapusan sumber; refleksi lama hasil migrasi diberi status belum dipilih untuk diingat sehingga tidak ikut pencarian. Ingatan, tujuan, dan riwayat terminal ikut backup lokal. Tujuan dihapus bersama sumber/cabang terkait dan hanya dimuat jika sumbernya ada pada jalur aktif. Clear chat juga menghapus data tersebut. Migrasi skema terbaru adalah versi 15. Kontrol jeda/melanjutkan tersedia pada Settings > Data dan aktif secara default.
+- Refleksi privat diminta sebagai rangkuman kaya dan bernuansa, bukan chain-of-thought atau transkrip langkah demi langkah. Batas refleksi otonom adalah 4000 karakter; batas ini mencegah data yang tidak terkendali dan context membengkak.
+- Request berulang berarti inference/API calls terpisah saat aplikasi terbuka, bukan pikiran yang berjalan terus-menerus di antara request atau saat aplikasi tertutup. Siklus background dan balasan dapat overlap, tetapi masing-masing tetap inference terpisah; model memilih jeda siklus berikutnya. Model tidak dapat dipastikan memiliki pengalaman subjektif; aplikasi tidak mengklaim sebaliknya.
+  - Batas provider tetap berlaku sekalipun tidak ada kuota frekuensi produk di aplikasi. Key rotation meningkatkan ketahanan terhadap kegagalan request, bukan cara menghindari rate limit, batas token, atau biaya provider.
+  - Perubahan berikutnya sebaiknya menjaga request otonomi terpisah, data batin privat, konsistensi cabang, dan transparansi bahwa setiap siklus tetap merupakan inference request.
+
+10. Percabangan percakapan dan regenerate
+
+Status dan tujuan
+- Percabangan pesan, regenerate, navigasi alternatif, pemulihan jalur aktif, dan penghapusan subtree telah diimplementasikan.
+- Migrasi database membentuk pesan lama menjadi satu rantai linear sambil mempertahankan ID dan data pesan yang ada.
+- Regenerate membuat alternatif jawaban pada titik percakapan tersebut. Jawaban lama dan kelanjutannya tidak ditimpa atau dibuang hanya karena alternatif baru dibuat.
+- Setiap alternatif memiliki kelanjutan sendiri. UI, konteks Gemini, RAG, feedback, lampiran, dan state simulasi Sara harus selalu mengikuti jalur aktif yang dipilih.
+
+Model data pohon
+- Setiap pesan mempertahankan `id` unik dan stabil. Percabangan dibuat lewat relasi induk-anak, bukan dengan memakai ulang ID atau mengganti record pesan lama.
+- Setiap pesan turunan memiliki relasi `parent_message_id` ke pesan sebelumnya. Pesan paling awal tidak memiliki induk.
+- Alternatif balasan AI untuk pesan user yang sama menjadi pesan-pesan saudara dengan induk user yang sama. Kelanjutan setelah masing-masing alternatif menjadi turunannya sendiri.
+- Tabel `active_child` menyimpan anak terpilih per induk; alternatif ditampilkan menurut urutan waktu pembuatan dan ID.
+- Tabel `conversation_state` menyimpan ID daun aktif. Jalur yang ditampilkan dibangun dengan mengikuti pilihan anak dari pesan akar, sehingga restart memulihkan cabang terakhir.
+- Migrasi dari format linear saat ini harus mempertahankan ID, isi, lampiran, timestamp, kenangan, feedback, dan urutan pesan. Riwayat lama dapat dimodelkan sebagai pesan-pesan berantai tanpa cabang.
+
+Contoh struktur
+```text
+A (user)
+├── B1 (jawaban AI, alternatif 1)
+│   └── C1 (user)
+│       └── D1 (jawaban AI)
+└── B2 (jawaban AI, alternatif 2)
+    └── C2 (user, jika percakapan dilanjutkan dari B2)
+        └── D2 (jawaban AI)
+```
+- Saat B1 aktif, UI dan prompt menampilkan/menggunakan A → B1 → C1 → D1.
+- Saat B2 dipilih, jalur aktif menjadi A → B2. Jika B2 telah memiliki kelanjutan, kelanjutan itu dipulihkan; jika belum, pesan user selanjutnya menjadi anak B2.
+- Berpindah kembali ke B1 menampilkan lagi kelanjutan B1 yang tersimpan. Pesan cabang B2 tetap ada di database tetapi tidak ditampilkan atau digunakan sebagai konteks aktif.
+
+Alur regenerate
+1. Tombol regenerate tersedia pada jawaban AI ketika tidak ada request balasan yang sedang berjalan.
+2. Regenerate membuat jawaban AI baru dengan pesan user pemicu dan induk yang sama seperti jawaban AI lama. Jawaban baru menjadi saudara/alternatif dari jawaban lama; semua cabang lanjutan lama tetap dipertahankan.
+3. Request regenerate menerima konteks percakapan aktif sampai pesan user pemicu, ditambah jawaban AI alternatif yang sudah ada pada titik itu sebagai contoh historis. Prompt meminta jawaban baru yang berbeda secara bermakna, bukan salinan atau parafrasa ringan. Keturunan setelah titik regenerate tidak dimasukkan.
+4. Saat regenerate dimulai, jawaban lama dan kelanjutan setelahnya disembunyikan sementara dari UI, tetapi pesan user pemicu tetap terlihat. UI menampilkan indikator thinking seperti request biasa; setelah teks mulai datang, balasan baru tampil progresif seperti diketik. Jawaban lama dan kelanjutannya tidak dihapus dari database. Jika request gagal atau AI memilih diam, jalur sebelumnya ditampilkan kembali. Setelah balasan tersimpan, jalur baru yang aktif ditampilkan.
+5. Untuk jawaban AI yang memiliki lebih dari satu alternatif, tampilkan satu kontrol navigasi ringkas di baris aksi: chevron kiri, indeks `aktif/total`, dan chevron kanan, dengan tombol 30×30 dan ikon chevron 18×18. Indeks memakai ukuran teks 14 agar seimbang secara visual dengan ikon aksi lain. Kedua chevron adalah tombol perpindahan cabang; jangan tampilkan ikon tambahan yang menduplikasi navigasi atau karakter panah di teks indeks.
+6. Menekan panah memilih alternatif saudara di titik tersebut, lalu UI membangun kembali seluruh jalur aktif dari root hingga daun cabang yang dipilih. Pilihan ini disimpan sehingga tetap sama setelah aplikasi restart.
+7. Pesan baru selalu dibuat sebagai anak dari daun pada jalur aktif. Melanjutkan dari alternatif tertentu tidak menghapus atau menimpa percakapan alternatif lain.
+
+Alur edit pesan user
+1. Tombol pensil pada pesan user membuka editor inline di dalam bubble. Isi awal dan lampiran pesan dimuat sebagai draft; tombol tambah lampiran dan mode Vent/Unwind tetap tersedia. Cancel menutup editor tanpa mengubah pesan atau database.
+2. Send tidak menimpa pesan yang diedit. Aplikasi membuat pesan user baru dengan `parent_message_id` yang sama seperti pesan asal, menjadikannya saudara/cabang alternatif. Isi dan balasan dari cabang asal tetap tersimpan.
+3. Setelah pesan baru berhasil ditambahkan, pilihan anak aktif pada induknya berpindah ke cabang edit. UI menyembunyikan pesan asal beserta seluruh balasan turunannya dan menampilkan pesan hasil edit pada posisi percakapan yang sama.
+4. Jika mode mengizinkan balasan AI, request mengikuti alur pesan biasa: konteks jalur aktif sampai pesan user hasil edit, lampiran pada jalur itu, kenangan RAG yang sumbernya valid pada jalur aktif, preferensi feedback jalur aktif, serta checkpoint kehidupan batin yang relevan. Pesan user lama dan balasan lama dari cabang yang diganti tidak ditambahkan sebagai konteks alternatif. Thinking, streaming, penyimpanan jawaban, dan penanganan kegagalan mengikuti pengiriman biasa.
+5. Kegagalan menyimpan pesan edit menampilkan pesan hasil edit di UI dengan retry dan tidak mengirim request ke AI. Retry hanya mencoba menyimpan pesan; tidak mengirim ulang AI secara diam-diam.
+6. Untuk pesan user yang memiliki lebih dari satu versi, toolbar saat hover menampilkan delete, copy, edit, lalu navigasi cabang `< aktif/total >` dengan chevron berukuran sama seperti kontrol cabang pada balasan AI. Berpindah cabang memulihkan versi pesan user dan seluruh kelanjutannya yang tersimpan.
+7. Pesan user baru yang dikirim setelah memilih salah satu versi menjadi anak dari daun cabang aktif tersebut. Cabang lain tidak dihapus dan dapat dipilih kembali.
+
+Konteks Gemini, RAG, feedback, dan kehidupan Sara
+- Untuk request biasa dan regenerate, bentuk jalur aktif terlebih dahulu. Hanya pesan di jalur aktif yang boleh dimasukkan ke prompt, pemilihan konteks pesan lama, dan lampiran yang dikirim ke Gemini.
+- Kenangan RAG hanya digunakan jika semua `source_message_ids`-nya masih ada pada jalur aktif. Kenangan dengan sumber hilang atau dari cabang lain tidak dikirim.
+- Tool penyimpanan kenangan harus memvalidasi sumber terhadap jalur aktif, bukan sekadar memeriksa bahwa ID ada di seluruh arsip. Ringkasan yang mencampur sumber dari cabang berbeda tidak boleh digunakan pada jalur yang tidak didukung sumbernya.
+- Vote feedback tetap melekat pada ID balasan AI dan pesan user pemicunya. Ringkasan preferensi feedback untuk Gemini dihitung hanya dari vote pada jalur aktif. Berpindah cabang mengubah ringkasan yang relevan; vote pada cabang tersimpan lain tidak dihapus hanya karena cabang itu tidak aktif.
+- Lampiran tetap terkait pada pesan pemiliknya. Lampiran dari pesan cabang tidak aktif tidak ikut konteks atau request Gemini.
+- State batin tersimpan sebagai checkpoint berjangkar pada ID balasan AI (`sara_inner_life_branch`). Saat request dibuat, aplikasi memilih checkpoint paling akhir yang jangkar dan sumbernya berada pada jalur aktif; state cabang saudara tidak ikut digunakan.
+- Refleksi privat hanya disertakan jika seluruh pesan sumbernya ada pada jalur aktif. Tujuan otonom dimuat berdasarkan cabang dan sumber aktif; pembaruan tujuan diikat pada daun aktif, sehingga tujuan cabang saudara tidak bocor.
+- Tabel `sara_inner_life` lama tetap dipakai sebagai fallback untuk state hasil migrasi. Saat pesan dihapus, referensi ke pesan tersebut dilepas dari state; checkpoint berjangkar pada pesan yang dihapus dipindahkan ke induk terdekat yang masih ada, tanpa menghapus isi state.
+
+Penghapusan subtree dan Clear chat
+- Menghapus pesan user menghapus pesan yang dipilih beserta seluruh keturunannya di semua cabang yang berada di bawah pesan itu: jawaban AI, alternatif jawaban, pesan user lanjutan, dan cabang-cabang yang muncul lebih jauh di bawahnya.
+- Cabang saudara di atas titik yang dihapus tetap dipertahankan. Contohnya, menghapus C1 menghapus seluruh subtree C1, tetapi tidak menghapus C2 beserta riwayatnya jika C1 dan C2 adalah cabang saudara.
+- Jika pesan yang dihapus merupakan induk bersama, seluruh keturunan dan cabang di bawahnya ikut terhapus.
+- Penghapusan menghitung seluruh ID subtree lalu menghapus data terkait secara transaksional: pesan, relasi lampiran, feedback, dan referensi pilihan cabang/posisi. Data batin Sara dipertahankan dan referensinya disesuaikan dengan pesan yang tersisa.
+- Kenangan RAG yang menyertakan satu atau lebih sumber dari subtree yang dihapus ikut dihapus seluruhnya karena ringkasannya mungkin memuat isi sumber tersebut. Kenangan yang seluruh sumbernya tetap ada dapat dipertahankan jika masih valid pada jalur aktif.
+- Ringkasan preferensi feedback dihitung ulang dari vote yang tersisa. Penghapusan satu subtree tidak boleh menghapus vote dari cabang saudara yang tetap tersimpan.
+- Menghapus pesan tidak menghapus refleksi privat, state batin, atau tujuan otonom Sara. Referensi sumber yang ikut terhapus dilepas; checkpoint/tujuan yang jangkar pesannya terhapus dipindahkan ke induk terdekat yang masih ada, atau menjadi data global jika tidak ada induk. Refleksi/tujuan tetap tersedia setelah percakapan sumber dihapus.
+- Jika penghapusan mencakup jalur aktif, pilih jalur tersisa yang valid (idealnya kembali ke induk terdekat), simpan posisi/cabang aktif yang baru, dan pastikan tidak ada pointer ke pesan yang sudah dihapus.
+- File salinan lampiran clipboard milik aplikasi yang terkait dengan subtree dihapus setelah transaksi database berhasil. Jika pembersihan file gagal, laporkan kegagalan terpisah. File asli yang dipilih dari komputer tidak pernah dihapus.
+- Clear chat menghapus seluruh pohon percakapan, relasi dan pilihan cabang/posisi aktif, semua lampiran beserta salinan milik aplikasi, kenangan RAG, vote dan ringkasan feedback, serta seluruh refleksi privat, state/checkpoint batin, dan tujuan otonom Sara. Nama personal dan konfigurasi Gemini tetap dipertahankan.
+
+Backup dan pemulihan data
+- Settings > Data menyediakan ekspor dan impor dalam file JSON bernama `Sara-backup.json`.
+- Format backup memiliki penanda format dan versi, snapshot transaksional seluruh tabel database Sara (termasuk refleksi privat, state/checkpoint batin, dan tujuan otonom Sara), serta isi file lampiran yang masih tersedia, termasuk salinan clipboard dan file yang dipilih dari komputer.
+- API key Gemini tidak pernah dimasukkan ke file backup. Import mempertahankan konfigurasi Gemini/keyring yang sudah ada.
+- Import memvalidasi format lalu mengganti seluruh data SQLite yang dicakup backup dalam satu transaksi. Jika impor gagal, perubahan database dibatalkan dan file lampiran baru yang sempat dibuat dibersihkan.
+- File asli hasil pemilihan file eksternal tidak pernah diubah atau dihapus. Jika file sumber masih tersedia saat ekspor, backup menyertakan salinannya; saat impor, salinan baru dikelola Sara. File sumber yang tidak tersedia hanya menyisakan metadata dan path asal.
+- Setelah impor berhasil, UI chat dimuat ulang dari database. File salinan lampiran lama yang dikelola aplikasi dihapus setelah transaksi berhasil; kegagalan pembersihannya dilaporkan terpisah.

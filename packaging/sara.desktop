@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Sara
+Comment=Personal AI chat
+Exec=/home/neverlabs/Documents/Sara/build/linux/x64/release/bundle/sara
+Icon=/home/neverlabs/Documents/Sara/assets/flutter_logo.png
+Terminal=false
+StartupNotify=true
+StartupWMClass=personal.sara.desktop
+Categories=Network;InstantMessaging;

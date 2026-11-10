@@ -1,0 +1,20 @@
+# Flutter and Dart generated files
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+build/
+coverage/
+/*.dill
+
+# Local secrets
+.env
+.env.*
+/credentials.json
+/secrets.json
+
+# Private local data if saved in the project root
+/message.sql
+/message.sql-*
+/sara-backup*.json
