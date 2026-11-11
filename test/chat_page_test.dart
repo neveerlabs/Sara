@@ -10,6 +10,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lucide_icons_flutter/lucide_icons_300.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sara_desktop/ai_config_store.dart';
 import 'package:sara_desktop/app_localizations.dart';
@@ -409,7 +410,7 @@ void main() {
     );
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     await tester.enterText(find.byType(TextField), 'Check the update.');
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pumpAndSettle();
 
     expect(notificationArguments, hasLength(1));
@@ -453,7 +454,7 @@ void main() {
     );
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     await tester.enterText(find.byType(TextField), 'Run a command.');
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     for (var attempt = 0;
         attempt < 40 &&
             find
@@ -501,7 +502,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'Check the update.');
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pumpAndSettle();
 
     expect(notificationArguments, isEmpty);
@@ -535,7 +536,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'Run the task.');
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pump();
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
@@ -624,6 +625,53 @@ void main() {
           find.byKey(const ValueKey('sara-background-thinking')), findsNothing);
     },
   );
+
+  testWidgets('reply handoff is limited to three background cycles',
+      (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final messageStore = _MemoryMessageStore();
+    final replyService = _FakeAutonomousReplyService()
+      ..subsequentDecision = _FakeAutonomousReplyService.restDecision
+      ..handoffToShare = const SaraResponseHandoff(
+        userIntent: 'Wants to discuss an update',
+        responseApproach: 'Answer directly',
+      );
+
+    await tester.pumpWidget(
+      _testApp(
+        configStore: _MemoryAiConfigStore(),
+        messageStore: messageStore,
+        replyService: replyService,
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 21));
+    expect(replyService.receivedHandoffs, [null]);
+
+    await tester.enterText(find.byType(TextField), 'What changed?');
+    await tester.tap(find.byKey(const ValueKey('submit-message-button')));
+    await tester.pumpAndSettle();
+    final exchange = messageStore.messages;
+    expect(exchange, hasLength(2));
+
+    for (var cycle = 0; cycle < 3; cycle++) {
+      await tester.pump(const Duration(minutes: 30));
+      await tester.pumpAndSettle();
+      expect(replyService.receivedHandoffs[cycle + 1], isNotNull);
+      expect(
+        replyService.receivedHandoffs[cycle + 1]!.sourceMessageIds,
+        exchange.map((message) => message.id).toList(),
+      );
+    }
+
+    await tester.pump(const Duration(minutes: 30));
+    await tester.pumpAndSettle();
+    expect(replyService.receivedHandoffs, hasLength(5));
+    expect(replyService.receivedHandoffs.last, isNull);
+  });
 
   testWidgets('autonomy failures back off and retry without repeated popups',
       (tester) async {
@@ -730,7 +778,7 @@ void main() {
     expect(brandRect.center.dx, closeTo(bannerRect.center.dx, 1));
     expect(brandRect.bottom, closeTo(bannerRect.bottom - 10, 1));
     expect(fromRect.bottom, closeTo(brandRect.top - 4, 1));
-    final personalIcon = find.byIcon(Icons.person_outline_rounded).last;
+    final personalIcon = find.byIcon(LucideIcons300.userRound).last;
     final personalIconTheme =
         find.ancestor(of: personalIcon, matching: find.byType(IconTheme)).first;
     expect(tester.widget<IconTheme>(personalIconTheme).data.size, 28);
@@ -746,7 +794,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('Set up Google Gemini'), findsNothing);
     expect(find.text('Gemini API keys'), findsOneWidget);
-    final configureIcon = find.byIcon(Icons.tune_rounded).last;
+    final configureIcon = find.byIcon(LucideIcons300.slidersHorizontal).last;
     final configureIconTheme = find
         .ancestor(of: configureIcon, matching: find.byType(IconTheme))
         .first;
@@ -929,7 +977,7 @@ void main() {
     expect(tester.getSize(composerImageTile), const Size(68, 68));
     await tester.enterText(find.byType(TextField), 'What is in this image?');
     await tester.pump();
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pumpAndSettle();
     expect(find.text('flutter_logo.png'), findsOneWidget);
     expect(messageStore.attachments.values.single.single.path, imageFile.path);
@@ -1329,7 +1377,7 @@ void main() {
     final thumbnailFile = (thumbnail.image as FileImage).file;
     expect(thumbnailFile.existsSync(), isTrue);
     expect(thumbnail.fit, BoxFit.cover);
-    expect(find.byIcon(Icons.play_circle_fill_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.circlePlay), findsOneWidget);
   });
 
   testWidgets('file picker blocks environment files', (tester) async {
@@ -1436,7 +1484,7 @@ void main() {
     expect(
       find.descendant(
         of: composer,
-        matching: find.byIcon(Icons.warning_amber_rounded),
+        matching: find.byIcon(LucideIcons300.triangleAlert),
       ),
       findsNothing,
     );
@@ -1528,7 +1576,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.triangleAlert), findsOneWidget);
     expect(find.byKey(const ValueKey('chat-composer')), findsOneWidget);
     expect(find.byKey(const ValueKey('room-file-drop-target')), findsOneWidget);
     final composer =
@@ -1586,7 +1634,7 @@ void main() {
     expect(store.attachments[message.id]!.single.path, isNull);
     expect(file.existsSync(), isTrue);
     expect(find.text('user-image.png'), findsOneWidget);
-    expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.triangleAlert), findsOneWidget);
   });
 
   testWidgets('sent attachment updates to missing warning while app is open',
@@ -1632,7 +1680,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('Previously attached file'), findsOneWidget);
-    expect(find.byIcon(Icons.warning_amber_rounded), findsNothing);
+    expect(find.byIcon(LucideIcons300.triangleAlert), findsNothing);
 
     await tester.runAsync(
       () async {
@@ -1643,7 +1691,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.triangleAlert), findsOneWidget);
   });
 
   testWidgets('restores bottom scroll on launch, scroll-up, and send',
@@ -1726,7 +1774,7 @@ void main() {
         find.byKey(const ValueKey('scroll-to-bottom-button')), findsOneWidget);
     await tester.enterText(find.byType(TextField), 'new message');
     await tester.pump();
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pumpAndSettle();
     expect(find.text('Hai juga!'), findsOneWidget);
     final listView = tester.widget<ListView>(find.byType(ListView).first);
@@ -1825,7 +1873,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'hello');
     await tester.pump();
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pumpAndSettle();
 
     expect(find.byType(MarkdownBody), findsNWidgets(2));
@@ -1833,7 +1881,7 @@ void main() {
     await tester.pump();
     expect(copiedText, 'Hai juga!');
     expect(find.byTooltip('Copied'), findsOneWidget);
-    expect(find.byIcon(Icons.check_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.check), findsOneWidget);
     expect(find.byTooltip('Speech'), findsOneWidget);
     expect(find.byTooltip('Regenerate'), findsOneWidget);
 
@@ -1860,7 +1908,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'Read this aloud.');
     await tester.pump();
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pumpAndSettle();
 
     await tester.tap(find.byTooltip('Speech'));
@@ -1868,13 +1916,13 @@ void main() {
     expect(speechController.lastText, 'Hai juga!');
     expect(speechController.lastVoice, 'id-ID');
     expect(find.byTooltip('Stop speech'), findsOneWidget);
-    expect(find.byIcon(Icons.volume_up_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.volume2), findsOneWidget);
 
     await tester.tap(find.byTooltip('Stop speech'));
     await tester.pump();
     expect(speechController.speakingMessageId.value, isNull);
     expect(find.byTooltip('Speech'), findsOneWidget);
-    expect(find.byIcon(Icons.volume_up_outlined), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.volume2), findsOneWidget);
   });
 
   testWidgets('Markdown code blocks are compact and copy their full contents',
@@ -1909,7 +1957,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'show code');
     await tester.pump();
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pumpAndSettle();
 
     final codeBlock = find.byKey(const ValueKey('markdown-code-block'));
@@ -2080,8 +2128,18 @@ void main() {
     expect(find.byTooltip('Delete'), findsOneWidget);
     expect(find.byTooltip('Copy'), findsNWidgets(2));
     expect(find.byTooltip('Edit'), findsOneWidget);
-    expect(find.byIcon(Icons.delete_rounded), findsOneWidget);
-    expect(find.byIcon(Icons.edit_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.trash2), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.pencil), findsOneWidget);
+    for (final key in [
+      'delete-target',
+      'copy-user-target',
+      'edit-target',
+    ]) {
+      expect(
+        tester.widget<IconButton>(find.byKey(ValueKey(key))).color,
+        const Color(0xFF9AA3B2),
+      );
+    }
     final actions = tester.widget<Container>(
       find.byKey(const ValueKey('user-message-actions')),
     );
@@ -2120,6 +2178,50 @@ void main() {
     expect(find.text('Remove this reply'), findsNothing);
     expect(find.text('Remove this too'), findsNothing);
     await mouse.removePointer();
+  });
+
+  testWidgets('AI messages do not have a more or delete action',
+      (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final messageStore = _MemoryMessageStore()
+      ..messages.addAll([
+        const ChatMessage(
+          id: 'user-before-ai-response',
+          role: 'user',
+          type: 'text',
+          content: 'A question',
+          timestamp: '2026-11-07 22:00:00',
+          createdAtUtc: 1793973600000,
+        ),
+        const ChatMessage(
+          id: 'ai-response',
+          role: 'model',
+          type: 'text',
+          content: 'An answer',
+          timestamp: '2026-11-07 22:00:01',
+          createdAtUtc: 1793973601000,
+          parentMessageId: 'user-before-ai-response',
+        ),
+      ]);
+
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: messageStore,
+        replyService: _FakeReplyService(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('more-options-ai-response')),
+      findsNothing,
+    );
+    expect(find.byTooltip('Delete'), findsNothing);
+    expect(messageStore.messages, hasLength(2));
   });
 
   testWidgets('user action spacing stays constant for long message bubbles',
@@ -2218,7 +2320,7 @@ void main() {
       tester.getSize(find.byKey(const ValueKey('submit-message-button'))),
       const Size(40, 40),
     );
-    expect(find.byIcon(Icons.arrow_upward_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.arrowUp), findsOneWidget);
     final emptyButton = tester.widget<FilledButton>(
       find.byKey(const ValueKey('submit-message-button')),
     );
@@ -2257,7 +2359,7 @@ void main() {
     await tester.enterText(find.byType(TextField), 'hello');
     await tester.pump();
     expect(find.byKey(const ValueKey('submit-message-button')), findsOneWidget);
-    expect(find.byIcon(Icons.arrow_upward_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.arrowUp), findsOneWidget);
     final readyButton = tester.widget<FilledButton>(
       find.byKey(const ValueKey('submit-message-button')),
     );
@@ -2677,7 +2779,7 @@ void main() {
         matching: find.byType(Icon),
       ),
     );
-    expect(likedIcon.icon, Icons.thumb_up_alt_outlined);
+    expect(likedIcon.icon, LucideIcons300.thumbsUp);
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('like-feedback-response')),
@@ -2696,7 +2798,7 @@ void main() {
         matching: find.byType(Icon),
       ),
     );
-    expect(dislikedIcon.icon, Icons.thumb_down_alt_outlined);
+    expect(dislikedIcon.icon, LucideIcons300.thumbsDown);
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('dislike-feedback-response')),
@@ -2709,6 +2811,100 @@ void main() {
     await tester.pumpAndSettle();
     expect(messageStore.feedback, isEmpty);
     expect(find.byTooltip('Dislike'), findsOneWidget);
+  });
+
+  testWidgets('AI reactions can be added, changed, and removed',
+      (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final messageStore = _MemoryMessageStore()
+      ..messages.addAll([
+        const ChatMessage(
+          id: 'reaction-user',
+          role: 'user',
+          type: 'text',
+          content: 'A question',
+          timestamp: '2026-11-07 22:00:00',
+          createdAtUtc: 1793973600000,
+        ),
+        const ChatMessage(
+          id: 'reaction-response',
+          role: 'model',
+          type: 'text',
+          content: 'A short answer.',
+          timestamp: '2026-11-07 22:00:01',
+          createdAtUtc: 1793973601000,
+        ),
+      ]);
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: messageStore,
+        replyService: _FakeReplyService(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final reactionButton = find.byKey(
+      const ValueKey('assistant-reaction-button'),
+    );
+    expect(find.byTooltip('Reaction'), findsOneWidget);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: tester.getCenter(reactionButton));
+    await mouse.moveTo(tester.getCenter(reactionButton));
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('assistant-reaction-capsule')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('quick-reaction-❤️')));
+    await tester.pumpAndSettle();
+    expect(messageStore.reactions['reaction-response'], (
+      'reaction-user',
+      '❤️',
+    ));
+    expect(
+      (tester.widget<IconButton>(reactionButton).icon as Text).data,
+      '❤️',
+    );
+
+    await tester.tap(reactionButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('more-reactions-button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('emoji-picker-panel')), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('emoji-picker-search')),
+      'thinking',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('emoji-picker-item-🤔')));
+    await tester.pumpAndSettle();
+    expect(messageStore.reactions['reaction-response'], (
+      'reaction-user',
+      '🤔',
+    ));
+    expect(find.byKey(const ValueKey('emoji-picker-panel')), findsNothing);
+
+    await tester.tap(reactionButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('quick-reaction-❤️')));
+    await tester.pumpAndSettle();
+    expect(messageStore.reactions['reaction-response'], (
+      'reaction-user',
+      '❤️',
+    ));
+
+    await tester.tap(reactionButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('quick-reaction-❤️')));
+    await tester.pumpAndSettle();
+    expect(messageStore.reactions, isEmpty);
+    expect(tester.widget<IconButton>(reactionButton).icon, isA<Icon>());
+    await mouse.removePointer();
   });
 
   testWidgets('opening settings does not stop an in-flight AI reply',
@@ -2985,14 +3181,14 @@ void main() {
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('import-backup-button')),
-        matching: find.byIcon(Icons.file_upload_outlined),
+        matching: find.byIcon(LucideIcons300.upload),
       ),
       findsOneWidget,
     );
     expect(
       find.descendant(
         of: find.byKey(const ValueKey('export-backup-button')),
-        matching: find.byIcon(Icons.file_download_outlined),
+        matching: find.byIcon(LucideIcons300.download),
       ),
       findsOneWidget,
     );
@@ -3079,7 +3275,7 @@ void main() {
 
     await tester.enterText(find.byType(TextField), 'temporary prompt');
     await tester.pump();
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pumpAndSettle();
 
     expect(messageStore.messages, isEmpty);
@@ -3150,7 +3346,7 @@ void main() {
     );
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     await tester.enterText(find.byType(TextField), 'trigger an error');
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pumpAndSettle();
 
     expect(notificationArguments, hasLength(1));
@@ -3182,7 +3378,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'save me');
     await tester.pump();
-    await tester.tap(find.byIcon(Icons.arrow_upward_rounded));
+    await tester.tap(find.byIcon(LucideIcons300.arrowUp));
     await tester.pumpAndSettle();
 
     expect(replyService.calls, 1);
@@ -3306,6 +3502,161 @@ void main() {
     expect(calls, ['minimize', 'toggleMaximize', 'startDragging', 'close']);
   });
 
+  testWidgets('emoji picker inserts a searched emoji at the text cursor',
+      (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: _MemoryMessageStore(),
+        replyService: _FakeReplyService(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final input = find.byType(TextField).first;
+    final composerInput = tester.widget<TextField>(input);
+    expect(composerInput.style!.fontFamilyFallback, isNull);
+    await tester.enterText(input, 'hello');
+    final controller = tester.widget<TextField>(input).controller!;
+    controller.selection = const TextSelection.collapsed(offset: 2);
+
+    final attachmentButton = tester
+        .getCenter(find.byKey(const ValueKey('composer-attachment-button')));
+    final emojiButton = find.byKey(const ValueKey('emoji-picker-button'));
+    final modeButton = find.byKey(const ValueKey('composer-mode-button'));
+    expect(tester.getCenter(emojiButton).dx, greaterThan(attachmentButton.dx));
+    expect(tester.getCenter(emojiButton).dx,
+        lessThan(tester.getCenter(modeButton).dx));
+    expect(
+      tester.getCenter(emojiButton).dx - attachmentButton.dx,
+      closeTo(40, 0.1),
+    );
+    final emojiButtonWidget = tester.widget<IconButton>(emojiButton);
+    expect(emojiButtonWidget.icon, isA<Icon>());
+    expect((emojiButtonWidget.icon as Icon).icon, LucideIcons300.smile);
+    expect((emojiButtonWidget.icon as Icon).color, Colors.white);
+    final emojiButtonShape = emojiButtonWidget.style!.shape!.resolve({});
+    expect(emojiButtonShape, isA<CircleBorder>());
+    expect((emojiButtonShape as CircleBorder).side, BorderSide.none);
+
+    await tester.tap(emojiButton);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('emoji-picker-panel')), findsOneWidget);
+    expect(find.text('Emoji'), findsNothing);
+    expect(find.byKey(const ValueKey('emoji-picker-close')), findsNothing);
+    expect(find.byKey(const ValueKey('emoji-picker-grid')), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('emoji-picker-search')),
+      'thinking',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('emoji-picker-item-🤔')));
+    await tester.pumpAndSettle();
+    final thinkingEmojiCell = tester.widget<IconButton>(
+      find.byKey(const ValueKey('emoji-picker-item-🤔')),
+    );
+    expect(thinkingEmojiCell.tooltip, isNull);
+    expect(
+      (thinkingEmojiCell.icon as Text).style!.fontFamily,
+      'Noto Color Emoji',
+    );
+
+    expect(controller.text, 'he🤔llo');
+    final controllerText = controller.buildTextSpan(
+      context: tester.element(input),
+      style: composerInput.style,
+      withComposing: false,
+    );
+    final emojiTextSpan = controllerText.children!
+        .cast<TextSpan>()
+        .singleWhere((span) => span.text == '🤔');
+    final regularTextSpan = controllerText.children!
+        .cast<TextSpan>()
+        .singleWhere((span) => span.text == 'h');
+    expect(emojiTextSpan.style!.fontFamily, 'Noto Color Emoji');
+    expect(regularTextSpan.style, isNull);
+    expect(find.byKey(const ValueKey('emoji-picker-panel')), findsOneWidget);
+    await tester.tapAt(const Offset(20, 200));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('emoji-picker-panel')), findsNothing);
+  });
+
+  testWidgets('a single sent emoji is saved and animated, mixed text is not',
+      (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final messageStore = _MemoryMessageStore();
+    final replyService = _FakeReplyService(reply: '🤔');
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: messageStore,
+        replyService: replyService,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final input = find.byType(TextField).first;
+    await tester.enterText(input, '🤔');
+    await tester.tap(find.byKey(const ValueKey('submit-message-button')));
+    await tester.pumpAndSettle();
+
+    final emojiMessage =
+        messageStore.messages.singleWhere((message) => message.role == 'user');
+    expect(emojiMessage.content, '🤔');
+    expect(
+      find.byKey(ValueKey('animated-emoji-${emojiMessage.id}')),
+      findsOneWidget,
+    );
+    final aiEmojiMessage =
+        messageStore.messages.singleWhere((message) => message.role == 'model');
+    final aiEmoji = find.byKey(
+      ValueKey('animated-emoji-${aiEmojiMessage.id}'),
+    );
+    expect(aiEmojiMessage.content, '🤔');
+    expect(aiEmoji, findsOneWidget);
+    final aiEmojiText = tester.widget<Text>(
+      find.descendant(of: aiEmoji, matching: find.byType(Text)),
+    );
+    expect(aiEmojiText.style?.fontSize, 48);
+
+    await tester.enterText(input, 'I am thinking 🤔');
+    await tester.tap(find.byKey(const ValueKey('submit-message-button')));
+    await tester.pumpAndSettle();
+    final mixedMessage =
+        messageStore.messages.lastWhere((message) => message.role == 'user');
+    expect(mixedMessage.content, 'I am thinking 🤔');
+    expect(
+      find.byKey(ValueKey('animated-emoji-${mixedMessage.id}')),
+      findsNothing,
+    );
+    final mixedMessageText = tester
+        .widgetList<SelectableText>(find.byType(SelectableText))
+        .singleWhere(
+          (text) => text.textSpan?.toPlainText() == mixedMessage.content,
+        );
+    TextStyle? renderedEmojiStyle;
+    void findEmojiStyle(InlineSpan span) {
+      if (span is TextSpan) {
+        if (span.text == '🤔') renderedEmojiStyle = span.style;
+        for (final child in span.children ?? const <InlineSpan>[]) {
+          findEmojiStyle(child);
+        }
+      }
+    }
+
+    findEmojiStyle(mixedMessageText.textSpan!);
+    expect(renderedEmojiStyle?.fontFamily, 'Noto Color Emoji');
+    expect(replyService.calls, 2);
+  });
+
   testWidgets('shows the dark chat theme and one session', (tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;
@@ -3337,7 +3688,7 @@ void main() {
     expect(find.text('Thinking'), findsNothing);
     expect(find.text('Search'), findsNothing);
     expect(find.text('Vent'), findsOneWidget);
-    expect(find.byIcon(Icons.volume_off_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.volumeX), findsOneWidget);
     expect(find.byKey(const ValueKey('sara-app-logo')), findsOneWidget);
     expect(find.text('Percakapan baru'), findsNothing);
 
@@ -3380,7 +3731,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Unwind'), findsOneWidget);
     expect(find.text('Vent'), findsNothing);
-    expect(find.byIcon(Icons.volume_up_rounded), findsOneWidget);
+    expect(find.byIcon(LucideIcons300.volume2), findsOneWidget);
 
     await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
@@ -3599,6 +3950,7 @@ class _MemoryMessageStore implements MessageStore {
   final autonomyGoals = <SaraAutonomyGoal>[];
   final terminalHistory = <TerminalCommandHistoryEntry>[];
   final feedback = <String, (String userMessageId, int rating)>{};
+  final reactions = <String, (String userMessageId, String reaction)>{};
   SaraInnerLife? innerLife;
   String? personalName;
   bool failNextAppend = false;
@@ -3790,6 +4142,11 @@ class _MemoryMessageStore implements MessageStore {
       };
 
   @override
+  Future<Map<String, String>> loadAssistantReactions() async => {
+        for (final entry in reactions.entries) entry.key: entry.value.$2,
+      };
+
+  @override
   Future<String?> loadFeedbackPreferenceSummary({
     Set<String>? activeMessageIds,
   }) async =>
@@ -3805,6 +4162,19 @@ class _MemoryMessageStore implements MessageStore {
       feedback.remove(responseMessageId);
     } else {
       feedback[responseMessageId] = (userMessageId, rating);
+    }
+  }
+
+  @override
+  Future<void> saveAssistantReaction(
+    String userMessageId,
+    String responseMessageId,
+    String? reaction,
+  ) async {
+    if (reaction == null) {
+      reactions.remove(responseMessageId);
+    } else {
+      reactions[responseMessageId] = (userMessageId, reaction);
     }
   }
 
@@ -3950,6 +4320,10 @@ class _MemoryMessageStore implements MessageStore {
       (responseId, value) =>
           deletedIds.contains(responseId) || deletedIds.contains(value.$1),
     );
+    reactions.removeWhere(
+      (responseId, value) =>
+          deletedIds.contains(responseId) || deletedIds.contains(value.$1),
+    );
   }
 
   @override
@@ -3974,6 +4348,7 @@ class _MemoryMessageStore implements MessageStore {
     autonomyGoals.clear();
     innerLife = null;
     feedback.clear();
+    reactions.clear();
   }
 
   @override
@@ -4113,6 +4488,7 @@ class _FakeReplyService implements AiReplyService {
   final String reply;
   final Future<String>? replyGate;
   final List<ChatAttachment> responseAttachments;
+  SaraResponseHandoff? handoffToShare;
   String? lastPersonalName;
   bool? lastThinkingEnabled;
   String? lastAutonomyThought;
@@ -4134,6 +4510,7 @@ class _FakeReplyService implements AiReplyService {
     Map<String, List<ChatAttachment>> attachmentsByMessage = const {},
     void Function(String text)? onText,
     void Function(List<ChatAttachment> attachments)? onMedia,
+    void Function(SaraResponseHandoff handoff)? onResponseHandoff,
     void Function(Object error)? onMemoryError,
     void Function(Object error)? onInnerLifeError,
     Future<CameraFrame> Function()? captureCameraFrame,
@@ -4199,6 +4576,8 @@ class _FakeReplyService implements AiReplyService {
     }
     onText?.call(reply);
     onMedia?.call(responseAttachments);
+    final handoff = handoffToShare;
+    if (handoff != null) onResponseHandoff?.call(handoff);
     return replyGate ?? Future<String>.value(reply);
   }
 }
@@ -4207,6 +4586,7 @@ class _FakeAutonomousReplyService extends _FakeReplyService
     implements SaraAutonomousService {
   int autonomyCalls = 0;
   int cameraToolAvailableCalls = 0;
+  final List<SaraResponseHandoff?> receivedHandoffs = [];
   Completer<SaraAutonomyDecision>? autonomyGate;
   SaraAutonomyDecision subsequentDecision = decision;
 
@@ -4268,9 +4648,11 @@ class _FakeAutonomousReplyService extends _FakeReplyService
     required String? personalName,
     required String innerLifeSummary,
     required List<SaraAutonomyGoal> currentGoals,
+    SaraResponseHandoff? responseHandoff,
     Future<CameraFrame> Function()? captureCameraFrame,
   }) async {
     autonomyCalls++;
+    receivedHandoffs.add(responseHandoff);
     if (captureCameraFrame != null) cameraToolAvailableCalls++;
     if (error != null) throw error!;
     final gate = autonomyGate;

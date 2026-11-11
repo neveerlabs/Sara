@@ -49,6 +49,33 @@ class SaraPrivateThought {
   }
 }
 
+class SaraResponseHandoff {
+  const SaraResponseHandoff({
+    required this.userIntent,
+    required this.responseApproach,
+    this.openThread = '',
+    this.sourceMessageIds = const [],
+  });
+
+  final String userIntent;
+  final String responseApproach;
+  final String openThread;
+  final List<String> sourceMessageIds;
+
+  bool isValidForPath(Iterable<String> activeMessageIds) {
+    final activeIds = activeMessageIds.toSet();
+    return sourceMessageIds.isNotEmpty &&
+        sourceMessageIds.every(activeIds.contains);
+  }
+
+  Map<String, Object?> toJson() => {
+        'userIntent': userIntent,
+        'responseApproach': responseApproach,
+        'openThread': openThread,
+        'sourceMessageIds': sourceMessageIds,
+      };
+}
+
 class SaraAutonomyDecision {
   const SaraAutonomyDecision({
     required this.reflection,
@@ -272,6 +299,7 @@ abstract interface class SaraAutonomousService {
     required String? personalName,
     required String innerLifeSummary,
     required List<SaraAutonomyGoal> currentGoals,
+    SaraResponseHandoff? responseHandoff,
     Future<CameraFrame> Function()? captureCameraFrame,
   });
 }

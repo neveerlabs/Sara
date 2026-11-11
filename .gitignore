@@ -8,13 +8,22 @@ build/
 coverage/
 /*.dill
 
-# Local secrets
+# Local secrets and credentials
 .env
 .env.*
+!.env.example
 /credentials.json
 /secrets.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
 
-# Private local data if saved in the project root
-/message.sql
-/message.sql-*
-/sara-backup*.json
+# Private local data
+message.sql*
+*.sqlite
+*.sqlite3
+*.db
+[Ss]ara-backup*.json

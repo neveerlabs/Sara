@@ -81,6 +81,7 @@ abstract interface class MessageStore {
     required String expectedLeafId,
   });
   Future<Map<String, int>> loadAssistantFeedback();
+  Future<Map<String, String>> loadAssistantReactions();
   Future<String?> loadFeedbackPreferenceSummary({
     Set<String>? activeMessageIds,
   });
@@ -88,6 +89,11 @@ abstract interface class MessageStore {
     String userMessageId,
     String responseMessageId,
     int? rating,
+  );
+  Future<void> saveAssistantReaction(
+    String userMessageId,
+    String responseMessageId,
+    String? reaction,
   );
   Future<List<SaraAutonomyGoal>> loadAutonomyGoalsForPath(
     List<String> activeMessageIds,
@@ -164,7 +170,7 @@ class SqliteMessageStore implements MessageStore {
     final database = await databaseFactory.openDatabase(
       databasePath,
       options: OpenDatabaseOptions(
-        version: 17,
+        version: 18,
         onCreate: (database, version) async {
           await _createMessageTable(database);
           await _createPersonalTable(database);
@@ -231,6 +237,9 @@ class SqliteMessageStore implements MessageStore {
           if (oldVersion < 17) {
             await _createTerminalCommandActivityLinkTable(database);
             await _deduplicateTerminalCommandHistory(database);
+          }
+          if (oldVersion < 18) {
+            await _migrateAssistantFeedbackForReactions(database);
           }
         },
       ),
@@ -476,17 +485,7 @@ class SqliteMessageStore implements MessageStore {
 
   static Future<void> _createAssistantFeedbackTables(
       DatabaseExecutor database) async {
-    await database.execute('''
-      CREATE TABLE assistant_feedback (
-        response_message_id TEXT PRIMARY KEY NOT NULL,
-        user_message_id TEXT NOT NULL,
-        rating INTEGER NOT NULL CHECK (rating IN (-1, 1)),
-        is_concise INTEGER NOT NULL,
-        has_list INTEGER NOT NULL,
-        has_code INTEGER NOT NULL,
-        updated_at_utc INTEGER NOT NULL
-      )
-    ''');
+    await _createAssistantFeedbackTable(database);
     await database.execute('''
       CREATE TABLE feedback_preference (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -494,6 +493,71 @@ class SqliteMessageStore implements MessageStore {
         updated_at_utc INTEGER NOT NULL
       )
     ''');
+  }
+
+  static Future<void> _createAssistantFeedbackTable(
+    DatabaseExecutor database,
+  ) async {
+    await database.execute('''
+      CREATE TABLE assistant_feedback (
+        response_message_id TEXT PRIMARY KEY NOT NULL,
+        user_message_id TEXT NOT NULL,
+        rating INTEGER CHECK (rating IN (-1, 1)),
+        reaction TEXT,
+        is_concise INTEGER NOT NULL,
+        has_list INTEGER NOT NULL,
+        has_code INTEGER NOT NULL,
+        updated_at_utc INTEGER NOT NULL,
+        CHECK (rating IS NOT NULL OR reaction IS NOT NULL)
+      )
+    ''');
+  }
+
+  static Future<void> _migrateAssistantFeedbackForReactions(
+    DatabaseExecutor database,
+  ) async {
+    final feedbackTableExists = await _tableExists(
+      database,
+      'assistant_feedback',
+    );
+    if (!feedbackTableExists) {
+      await _createAssistantFeedbackTable(database);
+    } else {
+      await database.execute(
+        'ALTER TABLE assistant_feedback RENAME TO assistant_feedback_v17',
+      );
+      await _createAssistantFeedbackTable(database);
+      await database.execute('''
+        INSERT INTO assistant_feedback (
+          response_message_id, user_message_id, rating, reaction,
+          is_concise, has_list, has_code, updated_at_utc
+        )
+        SELECT response_message_id, user_message_id, rating, NULL,
+               is_concise, has_list, has_code, updated_at_utc
+        FROM assistant_feedback_v17
+      ''');
+      await database.execute('DROP TABLE assistant_feedback_v17');
+    }
+    if (!await _tableExists(database, 'feedback_preference')) {
+      await database.execute('''
+        CREATE TABLE feedback_preference (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          summary TEXT NOT NULL,
+          updated_at_utc INTEGER NOT NULL
+        )
+      ''');
+    }
+  }
+
+  static Future<bool> _tableExists(
+    DatabaseExecutor database,
+    String table,
+  ) async {
+    final rows = await database.rawQuery(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+      [table],
+    );
+    return rows.isNotEmpty;
   }
 
   static Future<void> _createBranchTables(DatabaseExecutor database) async {
@@ -1264,10 +1328,26 @@ class SqliteMessageStore implements MessageStore {
 
   @override
   Future<Map<String, int>> loadAssistantFeedback() async {
-    final rows = await _database.query('assistant_feedback');
+    final rows = await _database.query(
+      'assistant_feedback',
+      where: 'rating IS NOT NULL',
+    );
     return {
       for (final row in rows)
         row['response_message_id']! as String: row['rating']! as int,
+    };
+  }
+
+  @override
+  Future<Map<String, String>> loadAssistantReactions() async {
+    final rows = await _database.query(
+      'assistant_feedback',
+      columns: ['response_message_id', 'reaction'],
+      where: 'reaction IS NOT NULL',
+    );
+    return {
+      for (final row in rows)
+        row['response_message_id']! as String: row['reaction']! as String,
     };
   }
 
@@ -1287,6 +1367,7 @@ class SqliteMessageStore implements MessageStore {
     }
     final rows = await _database.query('assistant_feedback');
     final activeRows = rows.where((row) =>
+        row['rating'] != null &&
         activeMessageIds.contains(row['response_message_id']) &&
         activeMessageIds.contains(row['user_message_id']));
     final likes = activeRows.where((row) => row['rating'] == 1).toList();
@@ -1323,38 +1404,45 @@ class SqliteMessageStore implements MessageStore {
 
     await _database.transaction((transaction) async {
       if (rating == null) {
-        await transaction.delete(
+        final existingRows = await transaction.query(
           'assistant_feedback',
+          columns: ['reaction'],
           where: 'response_message_id = ?',
           whereArgs: [responseMessageId],
-        );
-      } else {
-        final userRows = await transaction.query(
-          'message',
-          columns: ['role', 'created_at_utc'],
-          where: 'id = ?',
-          whereArgs: [userMessageId],
           limit: 1,
         );
-        final responseRows = await transaction.query(
-          'message',
-          columns: ['role', 'content', 'created_at_utc'],
-          where: 'id = ?',
+        if (existingRows.isNotEmpty) {
+          if (existingRows.single['reaction'] == null) {
+            await transaction.delete(
+              'assistant_feedback',
+              where: 'response_message_id = ?',
+              whereArgs: [responseMessageId],
+            );
+          } else {
+            await transaction.update(
+              'assistant_feedback',
+              {
+                'rating': null,
+                'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
+              },
+              where: 'response_message_id = ?',
+              whereArgs: [responseMessageId],
+            );
+          }
+        }
+      } else {
+        final content = await _validateFeedbackMessages(
+          transaction,
+          userMessageId,
+          responseMessageId,
+        );
+        final existingRows = await transaction.query(
+          'assistant_feedback',
+          columns: ['reaction'],
+          where: 'response_message_id = ?',
           whereArgs: [responseMessageId],
           limit: 1,
         );
-        if (userRows.isEmpty ||
-            userRows.single['role'] != 'user' ||
-            responseRows.isEmpty ||
-            responseRows.single['role'] != 'model' ||
-            (userRows.single['created_at_utc']! as int) >
-                (responseRows.single['created_at_utc']! as int)) {
-          throw StateError(
-            'Feedback must reference a stored user message and AI response.',
-          );
-        }
-
-        final content = responseRows.single['content']! as String;
         final features = _feedbackFeatures(content);
         await transaction.insert(
           'assistant_feedback',
@@ -1362,6 +1450,8 @@ class SqliteMessageStore implements MessageStore {
             'response_message_id': responseMessageId,
             'user_message_id': userMessageId,
             'rating': rating,
+            'reaction':
+                existingRows.isEmpty ? null : existingRows.single['reaction'],
             ...features,
             'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
           },
@@ -1370,6 +1460,102 @@ class SqliteMessageStore implements MessageStore {
       }
       await _refreshFeedbackPreference(transaction);
     });
+  }
+
+  @override
+  Future<void> saveAssistantReaction(
+    String userMessageId,
+    String responseMessageId,
+    String? reaction,
+  ) async {
+    if (reaction != null && reaction.trim().isEmpty) {
+      throw ArgumentError.value(
+          reaction, 'reaction', 'Must be an emoji or null.');
+    }
+
+    await _database.transaction((transaction) async {
+      final existingRows = await transaction.query(
+        'assistant_feedback',
+        columns: ['rating'],
+        where: 'response_message_id = ?',
+        whereArgs: [responseMessageId],
+        limit: 1,
+      );
+      if (reaction == null) {
+        if (existingRows.isNotEmpty) {
+          if (existingRows.single['rating'] == null) {
+            await transaction.delete(
+              'assistant_feedback',
+              where: 'response_message_id = ?',
+              whereArgs: [responseMessageId],
+            );
+          } else {
+            await transaction.update(
+              'assistant_feedback',
+              {
+                'reaction': null,
+                'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
+              },
+              where: 'response_message_id = ?',
+              whereArgs: [responseMessageId],
+            );
+          }
+        }
+      } else {
+        final content = await _validateFeedbackMessages(
+          transaction,
+          userMessageId,
+          responseMessageId,
+        );
+        await transaction.insert(
+          'assistant_feedback',
+          {
+            'response_message_id': responseMessageId,
+            'user_message_id': userMessageId,
+            'rating': existingRows.isEmpty
+                ? null
+                : existingRows.single['rating'] as int?,
+            'reaction': reaction,
+            ..._feedbackFeatures(content),
+            'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await _refreshFeedbackPreference(transaction);
+    });
+  }
+
+  static Future<String> _validateFeedbackMessages(
+    Transaction transaction,
+    String userMessageId,
+    String responseMessageId,
+  ) async {
+    final userRows = await transaction.query(
+      'message',
+      columns: ['role', 'created_at_utc'],
+      where: 'id = ?',
+      whereArgs: [userMessageId],
+      limit: 1,
+    );
+    final responseRows = await transaction.query(
+      'message',
+      columns: ['role', 'content', 'created_at_utc'],
+      where: 'id = ?',
+      whereArgs: [responseMessageId],
+      limit: 1,
+    );
+    if (userRows.isEmpty ||
+        userRows.single['role'] != 'user' ||
+        responseRows.isEmpty ||
+        responseRows.single['role'] != 'model' ||
+        (userRows.single['created_at_utc']! as int) >
+            (responseRows.single['created_at_utc']! as int)) {
+      throw StateError(
+        'Feedback must reference a stored user message and AI response.',
+      );
+    }
+    return responseRows.single['content']! as String;
   }
 
   static Map<String, int> _feedbackFeatures(String content) {
@@ -1390,7 +1576,9 @@ class SqliteMessageStore implements MessageStore {
   static Future<void> _refreshFeedbackPreference(
     Transaction transaction,
   ) async {
-    final rows = await transaction.query('assistant_feedback');
+    final rows = (await transaction.query('assistant_feedback'))
+        .where((row) => row['rating'] != null)
+        .toList(growable: false);
     final likes = rows.where((row) => row['rating'] == 1).toList();
     final dislikes = rows.where((row) => row['rating'] == -1).toList();
     final traits = <String>[];

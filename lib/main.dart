@@ -4,18 +4,22 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:emoji_picker_flutter/emoji_picker_flutter.dart' as emoji_picker;
+import 'package:emoji_picker_flutter/locales/emoji_set_en.dart'
+    show emojiSetEnglish;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
-import 'package:flutter_highlight/flutter_highlight.dart';
-import 'package:flutter_highlight/themes/atom-one-dark.dart';
-import 'package:markdown/markdown.dart' as md;
 import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_highlight/flutter_highlight.dart';
+import 'package:flutter_highlight/themes/atom-one-dark.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:image/image.dart' as img;
+import 'package:lucide_icons_flutter/lucide_icons_300.dart';
+import 'package:markdown/markdown.dart' as md;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:desktop_drop/desktop_drop.dart';
@@ -124,7 +128,103 @@ const _accent = Color(0xFF79A0FF);
 const _providerStorageKey = 'ai_provider';
 const _modelStorageKey = 'ai_model';
 const _defaultModel = 'gemini-3.5-flash-lite';
+const _emojiFontFamily = 'Noto Color Emoji';
 const _uuid = Uuid();
+
+String? _singleEmoji(String text) {
+  final graphemes = text.trim().characters;
+  if (graphemes.length != 1) return null;
+
+  final emoji = graphemes.first;
+  final codePoints = emoji.runes.toList();
+  final hasEmojiBase = codePoints.any((codePoint) {
+    if (codePoint >= 0x1F3FB && codePoint <= 0x1F3FF) return false;
+    return (codePoint >= 0x1F000 && codePoint <= 0x1FAFF) ||
+        (codePoint >= 0x2300 && codePoint <= 0x23FF) ||
+        (codePoint >= 0x2600 && codePoint <= 0x27BF) ||
+        (codePoint >= 0x2B00 && codePoint <= 0x2BFF) ||
+        const {
+          0x00A9,
+          0x00AE,
+          0x203C,
+          0x2049,
+          0x2122,
+          0x2139,
+          0x3030,
+          0x303D,
+          0x3297,
+          0x3299,
+        }.contains(codePoint);
+  });
+  return hasEmojiBase || codePoints.contains(0x20E3) ? emoji : null;
+}
+
+class _EmojiAwareTextEditingController extends TextEditingController {
+  @override
+  TextSpan buildTextSpan({
+    required BuildContext context,
+    TextStyle? style,
+    required bool withComposing,
+  }) {
+    final currentValue = value;
+    final composing = withComposing && currentValue.isComposingRangeValid
+        ? currentValue.composing
+        : TextRange.empty;
+    var offset = 0;
+    final spans = <TextSpan>[];
+    for (final grapheme in currentValue.text.characters) {
+      final end = offset + grapheme.length;
+      final isEmoji = _singleEmoji(grapheme) != null;
+      final overlapsComposing =
+          composing.isValid && composing.start < end && composing.end > offset;
+      TextStyle? spanStyle =
+          isEmoji ? const TextStyle(fontFamily: _emojiFontFamily) : null;
+      if (overlapsComposing) {
+        spanStyle = (spanStyle ?? const TextStyle())
+            .merge(const TextStyle(decoration: TextDecoration.underline));
+      }
+      spans.add(TextSpan(text: grapheme, style: spanStyle));
+      offset = end;
+    }
+    return TextSpan(style: style, children: spans);
+  }
+}
+
+class _EmojiMarkdownSyntax extends md.InlineSyntax {
+  _EmojiMarkdownSyntax() : super(r'[^\x00-\x7F]+');
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    for (final grapheme in match[0]!.characters) {
+      if (_singleEmoji(grapheme) != null) {
+        parser.addNode(md.Element.text('saraEmoji', grapheme));
+      } else {
+        parser.addNode(md.Text(grapheme));
+      }
+    }
+    return true;
+  }
+}
+
+class _MarkdownEmojiBuilder extends MarkdownElementBuilder {
+  @override
+  Widget visitElementAfterWithContext(
+    BuildContext context,
+    md.Element element,
+    TextStyle? preferredStyle,
+    TextStyle? parentStyle,
+  ) {
+    return Text.rich(
+      TextSpan(
+        text: element.textContent,
+        style: (parentStyle ?? preferredStyle ?? const TextStyle()).copyWith(
+          fontFamily: _emojiFontFamily,
+        ),
+      ),
+    );
+  }
+}
+
 OverlayEntry? _activeToast;
 Timer? _activeToastTimer;
 Future<void> Function(String message)? _notifyUnseenError;
@@ -213,7 +313,7 @@ void _showToast(
                       key: const ValueKey('copy-toast-error'),
                       tooltip: appText('Copy error details'),
                       onPressed: () => unawaited(_copyToastMessage(message)),
-                      icon: const Icon(Icons.copy_rounded),
+                      icon: const Icon(LucideIcons300.copy),
                       color: _text,
                       iconSize: 16,
                       visualDensity: VisualDensity.compact,
@@ -424,7 +524,7 @@ class ChatPage extends StatefulWidget {
 }
 
 class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
-  final _messageController = TextEditingController();
+  final _messageController = _EmojiAwareTextEditingController();
   final _messageFocus = FocusNode();
   final _scrollController = ScrollController();
   final _composerKey = GlobalKey<_ComposerState>();
@@ -434,6 +534,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   final Map<String, String> _retryErrors = {};
   final Map<String, List<ChatAttachment>> _attachmentsByMessage = {};
   final Map<String, int> _assistantFeedback = {};
+  final Map<String, String> _assistantReactions = {};
   final Map<String, List<TerminalCommandHistoryEntry>>
       _terminalActivitiesByResponse = {};
   Map<String, MessageBranchNavigation> _messageBranches = {};
@@ -458,6 +559,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   int _autonomyConsecutiveFailures = 0;
   int _autonomyContextRevision = 0;
   String? _latestAutonomyThought;
+  _TemporaryResponseHandoff? _latestResponseHandoff;
   bool _applicationDetached = false;
   bool _applicationForeground = true;
   bool _chatRoomVisible = true;
@@ -579,6 +681,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       });
       final attachments = await messageStore.loadAttachments();
       final assistantFeedback = await messageStore.loadAssistantFeedback();
+      final assistantReactions = await messageStore.loadAssistantReactions();
       final branches = await messageStore.loadMessageBranches();
       if (!mounted) return;
       setState(() {
@@ -597,6 +700,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         _assistantFeedback
           ..clear()
           ..addAll(assistantFeedback);
+        _assistantReactions
+          ..clear()
+          ..addAll(assistantReactions);
         _messageBranches = branches;
         _terminalActivitiesByResponse
           ..clear()
@@ -665,11 +771,20 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       final currentGoals =
           await messageStore.loadAutonomyGoalsForPath(historyIds);
       final personalName = await messageStore.readPersonalName();
+      final storedHandoff = _latestResponseHandoff;
+      final responseHandoff = storedHandoff != null &&
+              storedHandoff.handoff.isValidForPath(historyIds)
+          ? storedHandoff
+          : null;
+      if (storedHandoff != null && responseHandoff == null) {
+        _latestResponseHandoff = null;
+      }
       final decision = await autonomyService.thinkAutonomously(
         activeMessageIds: historyIds,
         personalName: personalName,
         innerLifeSummary: jsonEncode(innerLife.toMap()),
         currentGoals: currentGoals,
+        responseHandoff: responseHandoff?.handoff,
         captureCameraFrame: _cameraToolAvailable ? _captureFrameForSara : null,
       );
       if (decision.reflection.trim().isEmpty ||
@@ -689,6 +804,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       if (decision.remember &&
           decision.sourceMessageIds.any((id) => !historyIds.contains(id))) {
         throw StateError('Sara returned an invalid memory source.');
+      }
+      if (responseHandoff != null &&
+          identical(_latestResponseHandoff, responseHandoff)) {
+        responseHandoff.remainingCycles--;
+        if (responseHandoff.remainingCycles <= 0) {
+          _latestResponseHandoff = null;
+        }
       }
       _latestAutonomyThought = decision.reflection;
       if (decision.remember) {
@@ -827,6 +949,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     return true;
   }
 
+  void _clearResponseHandoff() {
+    _latestResponseHandoff = null;
+  }
+
   Future<void> _setAutonomyEnabled(bool enabled) async {
     final preferences = await SharedPreferences.getInstance();
     final saved =
@@ -839,6 +965,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     if (enabled) {
       _scheduleAutonomy(const Duration(seconds: 1));
     } else {
+      _clearResponseHandoff();
       _autonomyTimer?.cancel();
       _cancelAutonomousThinking();
     }
@@ -1240,6 +1367,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       content: text,
       parentMessageId: _messages.isEmpty ? null : _messages.last.id,
     );
+    _clearResponseHandoff();
     _autonomyContextRevision++;
     setState(() {
       _isSending = true;
@@ -1295,6 +1423,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     final text = content.trim();
     if (text.isEmpty && attachments.isEmpty) return;
     final original = _messages[sourceIndex];
+    _clearResponseHandoff();
     _autonomyContextRevision++;
     setState(() => _isSending = true);
     late final List<ChatAttachment> branchAttachments;
@@ -1543,9 +1672,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     if (_isSending) return;
     final messageStore = _messageStore;
     final index = _messages.indexWhere((message) => message.id == messageId);
-    if (messageStore == null || index < 0 || _messages[index].role != 'user') {
+    if (messageStore == null || index < 0) {
       return;
     }
+    if (_messages[index].role != 'user') return;
 
     final shouldDelete = await _showIosConfirmation(
       context: context,
@@ -1588,6 +1718,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     for (final id in ids) {
       _attachmentsByMessage.remove(id);
       _assistantFeedback.remove(id);
+      _assistantReactions.remove(id);
       _repliesNeedingSave.remove(id);
       _messagesNeedingOnlySave.remove(id);
       _retryErrors.remove(id);
@@ -1621,6 +1752,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     final branches = await messageStore.loadMessageBranches();
     final attachments = await messageStore.loadAttachments();
     final feedback = await messageStore.loadAssistantFeedback();
+    final reactions = await messageStore.loadAssistantReactions();
+    final handoff = _latestResponseHandoff;
+    if (handoff != null &&
+        !handoff.handoff
+            .isValidForPath(messages.map((message) => message.id))) {
+      _latestResponseHandoff = null;
+    }
     if (!mounted) return;
     setState(() {
       _messages
@@ -1636,6 +1774,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       _assistantFeedback
         ..clear()
         ..addAll(feedback);
+      _assistantReactions
+        ..clear()
+        ..addAll(reactions);
     });
     _scrollToLatest();
   }
@@ -1659,6 +1800,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
   Future<void> _regenerateMessage(String responseMessageId) async {
     if (_isSending) return;
+    _clearResponseHandoff();
     _autonomyContextRevision++;
     final responseIndex =
         _messages.indexWhere((message) => message.id == responseMessageId);
@@ -1741,6 +1883,36 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _setAssistantReaction(
+    String userMessageId,
+    String responseMessageId,
+    String? reaction,
+  ) async {
+    final messageStore = _messageStore;
+    if (_isSending || messageStore == null) return;
+    try {
+      await messageStore.saveAssistantReaction(
+        userMessageId,
+        responseMessageId,
+        reaction,
+      );
+      if (!mounted) return;
+      setState(() {
+        if (reaction == null) {
+          _assistantReactions.remove(responseMessageId);
+        } else {
+          _assistantReactions[responseMessageId] = reaction;
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage(appText(
+        'Could not save response reaction: {error}',
+        values: {'error': error},
+      ));
+    }
+  }
+
   Future<void> _generateReplyFor(
     ChatMessage userMessage,
     MessageStore messageStore,
@@ -1748,8 +1920,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     bool isRegenerate = false,
     List<ChatMessage> previousBranchReplies = const [],
   }) async {
+    _clearResponseHandoff();
     final autonomyThought = _latestAutonomyThought;
     final responseMessageId = _uuid.v4();
+    SaraResponseHandoff? pendingResponseHandoff;
     if (mounted) {
       setState(() => _activeReplyResponseMessageId = responseMessageId);
     }
@@ -1869,6 +2043,17 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         attachmentsByMessage: historyAttachments,
         onText: receiveStreamedText,
         onMedia: (attachments) => generatedAttachments = attachments,
+        onResponseHandoff:
+            _autonomyEnabled && replyService is SaraAutonomousService
+                ? (handoff) {
+                    pendingResponseHandoff = SaraResponseHandoff(
+                      userIntent: handoff.userIntent,
+                      responseApproach: handoff.responseApproach,
+                      openThread: handoff.openThread,
+                      sourceMessageIds: [userMessage.id, responseMessageId],
+                    );
+                  }
+                : null,
         onMemoryError: (error) {
           if (mounted) {
             _showMessage(
@@ -1959,6 +2144,11 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
               modelMessage.id: generatedAttachments,
           },
         );
+        if (pendingResponseHandoff != null) {
+          _latestResponseHandoff = _TemporaryResponseHandoff(
+            handoff: pendingResponseHandoff!,
+          );
+        }
         await _refreshActivePath(messageStore);
         if (!mounted) return;
         setState(() {
@@ -2249,6 +2439,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       );
       if (shouldImport != true || !mounted) return;
 
+      _clearResponseHandoff();
+      _autonomyContextRevision++;
       final restoreResult = await SaraBackupService().restoreBackup(
         messageStore,
         Uint8List.fromList(backupBytes),
@@ -2257,6 +2449,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       final history = await messageStore.loadActiveMessages();
       final attachments = await messageStore.loadAttachments();
       final feedback = await messageStore.loadAssistantFeedback();
+      final reactions = await messageStore.loadAssistantReactions();
       final branches = await messageStore.loadMessageBranches();
       if (!mounted) return;
       setState(() {
@@ -2269,6 +2462,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         _assistantFeedback
           ..clear()
           ..addAll(feedback);
+        _assistantReactions
+          ..clear()
+          ..addAll(reactions);
         _messageBranches = branches;
         _repliesNeedingSave.clear();
         _messagesNeedingOnlySave.clear();
@@ -2323,6 +2519,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       return;
     }
 
+    _clearResponseHandoff();
+    _autonomyContextRevision++;
     if (mounted) {
       setState(() {
         _messages.clear();
@@ -2332,6 +2530,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         _retryErrors.clear();
         _attachmentsByMessage.clear();
         _assistantFeedback.clear();
+        _assistantReactions.clear();
         _terminalActivitiesByResponse.clear();
       });
     }
@@ -2491,6 +2690,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                       assistantFeedback: _assistantFeedback,
                                       onSetAssistantFeedback:
                                           _setAssistantFeedback,
+                                      assistantReactions: _assistantReactions,
+                                      onSetAssistantReaction:
+                                          _setAssistantReaction,
                                       speakingMessageId:
                                           _speechPlaybackController
                                               .speakingMessageId.value,
@@ -2559,7 +2761,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                             child: IconButton(
                               tooltip: appText('Settings'),
                               onPressed: _openSettings,
-                              icon: const Icon(Icons.settings_outlined),
+                              icon: const Icon(LucideIcons300.settings),
                               color: _muted,
                             ),
                           ),
@@ -2582,7 +2784,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
                                     const Icon(
-                                      Icons.videocam_rounded,
+                                      LucideIcons300.video,
                                       size: 17,
                                       color: Color(0xFFFF8585),
                                     ),
@@ -2602,7 +2804,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                       tooltip: appText('Stop camera access'),
                                       onPressed:
                                           _stopAutonomousCameraFromIndicator,
-                                      icon: const Icon(Icons.close_rounded),
+                                      icon: const Icon(LucideIcons300.x),
                                       color: _muted,
                                       iconSize: 16,
                                       visualDensity: VisualDensity.compact,
@@ -2644,7 +2846,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        const Icon(Icons.file_upload_outlined,
+                                        const Icon(LucideIcons300.upload,
                                             color: _accent),
                                         const SizedBox(width: 10),
                                         Text(
@@ -3238,12 +3440,13 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                     ),
                   ),
                   const Spacer(),
-                  const Icon(Icons.tune_rounded, color: _muted, size: 17),
+                  const Icon(LucideIcons300.slidersHorizontal,
+                      color: _muted, size: 17),
                   const SizedBox(width: 8),
                   IconButton(
                     tooltip: appText('Close settings'),
                     onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close_rounded, size: 18),
+                    icon: const Icon(LucideIcons300.x, size: 18),
                     color: _muted,
                   ),
                 ],
@@ -3273,7 +3476,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                           ),
                         ),
                         _SettingsNavItem(
-                          icon: const Icon(Icons.person_outline_rounded),
+                          icon: const Icon(LucideIcons300.userRound),
                           label: appText('Personal'),
                           selected: _section == 0,
                           onTap: () => setState(() => _section = 0),
@@ -3281,7 +3484,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                         const SizedBox(height: 5),
                         _SettingsNavItem(
                           key: const ValueKey('settings-nav-configure'),
-                          icon: const Icon(Icons.tune_rounded),
+                          icon: const Icon(LucideIcons300.slidersHorizontal),
                           label: appText('Configure'),
                           selected: _section == 1,
                           onTap: () => setState(() {
@@ -3741,7 +3944,7 @@ class _PersonalSettings extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _SettingsSectionHeader(
-          icon: const Icon(Icons.person_outline_rounded),
+          icon: const Icon(LucideIcons300.userRound),
           iconSize: 28,
           title: appText('Personal'),
           subtitle: appText('Make Sara feel more like yours.'),
@@ -3801,7 +4004,7 @@ class _PersonalSettings extends StatelessWidget {
                                   color: Colors.white,
                                 ),
                               )
-                            : const Icon(Icons.save_outlined, size: 16),
+                            : const Icon(LucideIcons300.save, size: 16),
                         label: Text(
                           appText(isSaving ? 'Saving...' : 'Save name'),
                         ),
@@ -3983,7 +4186,7 @@ class _DataSettings extends StatelessWidget {
                     child: Row(
                       children: [
                         const Icon(
-                          Icons.videocam_rounded,
+                          LucideIcons300.video,
                           size: 18,
                           color: Color(0xFFFF8585),
                         ),
@@ -4070,14 +4273,14 @@ class _DataSettings extends StatelessWidget {
               const SizedBox(width: 12),
               _BackupActionButton(
                 key: const ValueKey('import-backup-button'),
-                icon: Icons.file_upload_outlined,
+                icon: LucideIcons300.upload,
                 label: appText('Import'),
                 onPressed: isBusy ? null : onImportBackup,
               ),
               const SizedBox(width: 8),
               _BackupActionButton(
                 key: const ValueKey('export-backup-button'),
-                icon: Icons.file_download_outlined,
+                icon: LucideIcons300.download,
                 label: appText('Export'),
                 onPressed: isBusy ? null : onExportBackup,
               ),
@@ -4213,7 +4416,7 @@ class _ConfigureSettings extends StatelessWidget {
       padding: EdgeInsets.zero,
       children: [
         _SettingsSectionHeader(
-          icon: const Icon(Icons.tune_rounded),
+          icon: const Icon(LucideIcons300.slidersHorizontal),
           iconSize: 28,
           title: appText('Configure'),
           subtitle: appText('Adjust your AI connection settings.'),
@@ -4298,7 +4501,7 @@ class _ConfigureHelp extends StatelessWidget {
           FilledButton.icon(
             key: const ValueKey('open-google-ai-studio'),
             onPressed: onOpenGoogleAiStudio,
-            icon: const Icon(Icons.open_in_new_rounded, size: 16),
+            icon: const Icon(LucideIcons300.externalLink, size: 16),
             label: Text(appText('Open Google AI Studio')),
           ),
         ],
@@ -4387,7 +4590,7 @@ class _AiApiSettings extends StatelessWidget {
             Expanded(
               child: _SettingsValueCard(
                 title: appText('Provider'),
-                icon: Icons.auto_awesome_rounded,
+                icon: LucideIcons300.sparkles,
                 value: 'Google Gemini',
                 detail: 'Gemini API',
               ),
@@ -4396,7 +4599,7 @@ class _AiApiSettings extends StatelessWidget {
             Expanded(
               child: _SettingsValueCard(
                 title: appText('Model'),
-                icon: Icons.memory_rounded,
+                icon: LucideIcons300.brain,
                 value: modelName,
                 valueKey: const ValueKey('ai-current-model'),
                 monospace: true,
@@ -4473,7 +4676,7 @@ class _AiApiSettings extends StatelessWidget {
                 autocorrect: false,
                 decoration: _settingsInputDecoration(
                   hintText: appText('Paste Gemini API key'),
-                  prefixIcon: const Icon(Icons.key_rounded, size: 18),
+                  prefixIcon: const Icon(LucideIcons300.keyRound, size: 18),
                 ),
               ),
               const SizedBox(height: 10),
@@ -4481,7 +4684,7 @@ class _AiApiSettings extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   const Icon(
-                    Icons.shield_outlined,
+                    LucideIcons300.shield,
                     size: 15,
                     color: Color(0xFF65C993),
                   ),
@@ -4506,7 +4709,7 @@ class _AiApiSettings extends StatelessWidget {
                               color: Colors.white,
                             ),
                           )
-                        : const Icon(Icons.add_rounded, size: 16),
+                        : const Icon(LucideIcons300.plus, size: 16),
                     label:
                         Text(appText(isSaving ? 'Saving...' : 'Add API key')),
                     style: FilledButton.styleFrom(
@@ -4564,7 +4767,7 @@ class _SettingsValueCard extends StatelessWidget {
                 style: const TextStyle(color: _muted, fontSize: 11),
               ),
               const Spacer(),
-              const Icon(Icons.lock_outline_rounded, size: 13, color: _muted),
+              const Icon(LucideIcons300.lockKeyhole, size: 13, color: _muted),
             ],
           ),
           const SizedBox(height: 12),
@@ -4613,7 +4816,7 @@ class _ApiKeyTile extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const Icon(Icons.key_rounded, size: 15, color: _muted),
+          const Icon(LucideIcons300.keyRound, size: 15, color: _muted),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -4625,7 +4828,7 @@ class _ApiKeyTile extends StatelessWidget {
             tooltip:
                 appText('Remove API key {index}', values: {'index': index + 1}),
             onPressed: onRemove,
-            icon: const Icon(Icons.close_rounded, size: 16),
+            icon: const Icon(LucideIcons300.x, size: 16),
             color: _muted,
             constraints: const BoxConstraints.tightFor(width: 30, height: 30),
             padding: EdgeInsets.zero,
@@ -4699,6 +4902,8 @@ class _ConversationView extends StatelessWidget {
     required this.activeReplyResponseMessageId,
     required this.assistantFeedback,
     required this.onSetAssistantFeedback,
+    required this.assistantReactions,
+    required this.onSetAssistantReaction,
     required this.speakingMessageId,
     required this.loadingSpeechMessageId,
     required this.onToggleSpeech,
@@ -4731,6 +4936,12 @@ class _ConversationView extends StatelessWidget {
   final void Function(
           String userMessageId, String responseMessageId, int? rating)
       onSetAssistantFeedback;
+  final Map<String, String> assistantReactions;
+  final void Function(
+    String userMessageId,
+    String responseMessageId,
+    String? reaction,
+  ) onSetAssistantReaction;
   final String? speakingMessageId;
   final String? loadingSpeechMessageId;
   final Future<void> Function(String messageId, String text) onToggleSpeech;
@@ -4802,6 +5013,8 @@ class _ConversationView extends StatelessWidget {
                           feedbackRating: assistantFeedback[message.id],
                           feedbackEnabled: !isSending,
                           onSetFeedback: onSetAssistantFeedback,
+                          reaction: assistantReactions[message.id],
+                          onSetReaction: onSetAssistantReaction,
                           isSpeechPlaying: speakingMessageId == message.id,
                           isSpeechLoading: loadingSpeechMessageId == message.id,
                           onToggleSpeech: () => onToggleSpeech(
@@ -4855,6 +5068,13 @@ class _ConversationView extends StatelessWidget {
     }
     return null;
   }
+}
+
+class _TemporaryResponseHandoff {
+  _TemporaryResponseHandoff({required this.handoff});
+
+  final SaraResponseHandoff handoff;
+  int remainingCycles = 3;
 }
 
 class _PendingTerminalCommandApproval {
@@ -5140,7 +5360,7 @@ class _TerminalCommandApprovalCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.terminal_rounded, color: _accent, size: 18),
+              const Icon(LucideIcons300.terminal, color: _accent, size: 18),
               const SizedBox(width: 7),
               Expanded(
                 child: Text(
@@ -5321,6 +5541,46 @@ class _ThinkingIndicator extends StatelessWidget {
   }
 }
 
+class _AnimatedEmojiMessage extends StatelessWidget {
+  const _AnimatedEmojiMessage({
+    super.key,
+    required this.emoji,
+  });
+
+  final String emoji;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 760),
+      builder: (context, progress, child) {
+        final bounce = math.sin(progress * math.pi * 4) * (1 - progress);
+        final tilt = math.sin(progress * math.pi * 6) * (1 - progress) * 0.13;
+        return Transform.translate(
+          offset: Offset(0, -bounce * 9),
+          child: Transform.rotate(
+            angle: tilt,
+            child: Transform.scale(
+              scale: 1 + bounce * 0.08,
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: Text(
+        emoji,
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          fontFamily: _emojiFontFamily,
+          fontSize: 48,
+          height: 1.15,
+        ),
+      ),
+    );
+  }
+}
+
 class _MessageRow extends StatefulWidget {
   const _MessageRow({
     super.key,
@@ -5341,8 +5601,10 @@ class _MessageRow extends StatefulWidget {
     required this.isActiveReply,
     this.feedbackUserMessageId,
     this.feedbackRating,
+    this.reaction,
     required this.feedbackEnabled,
     required this.onSetFeedback,
+    required this.onSetReaction,
     required this.isSpeechPlaying,
     required this.isSpeechLoading,
     required this.onToggleSpeech,
@@ -5370,10 +5632,16 @@ class _MessageRow extends StatefulWidget {
   final bool isActiveReply;
   final String? feedbackUserMessageId;
   final int? feedbackRating;
+  final String? reaction;
   final bool feedbackEnabled;
   final void Function(
           String userMessageId, String responseMessageId, int? rating)
       onSetFeedback;
+  final void Function(
+    String userMessageId,
+    String responseMessageId,
+    String? reaction,
+  ) onSetReaction;
   final bool isSpeechPlaying;
   final bool isSpeechLoading;
   final VoidCallback onToggleSpeech;
@@ -5389,7 +5657,7 @@ class _MessageRowState extends State<_MessageRow> {
   bool _terminalActivityExpanded = false;
   bool _unwindMode = false;
   bool _isPickingEditAttachments = false;
-  final _editController = TextEditingController();
+  final _editController = _EmojiAwareTextEditingController();
   final List<ChatAttachment> _editAttachments = [];
   final Map<String, Future<LinkPreview?>> _linkPreviews = {};
   final _linkPreviewService = LinkPreviewService();
@@ -5577,7 +5845,7 @@ class _MessageRowState extends State<_MessageRow> {
                       height: 18,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
-                  : const Icon(Icons.add_rounded, size: 22),
+                  : const Icon(LucideIcons300.plus, size: 22),
               color: _text,
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints.tightFor(width: 32, height: 32),
@@ -5585,9 +5853,8 @@ class _MessageRowState extends State<_MessageRow> {
             const SizedBox(width: 4),
             _ComposerMode(
               key: ValueKey('edit-mode-${widget.message.id}'),
-              icon: _unwindMode
-                  ? Icons.volume_up_rounded
-                  : Icons.volume_off_rounded,
+              icon:
+                  _unwindMode ? LucideIcons300.volume2 : LucideIcons300.volumeX,
               label: appText(_unwindMode ? 'Unwind' : 'Vent'),
               selected: _unwindMode,
               onTap: () => setState(() => _unwindMode = !_unwindMode),
@@ -5642,6 +5909,8 @@ class _MessageRowState extends State<_MessageRow> {
   @override
   Widget build(BuildContext context) {
     final message = widget.message;
+    final emojiOnlyMessage =
+        widget.attachments.isEmpty ? _singleEmoji(message.content) : null;
     final waitingForTerminalReply = message.role == 'model' &&
         message.content.trim().isEmpty &&
         widget.attachments.isEmpty &&
@@ -5664,7 +5933,7 @@ class _MessageRowState extends State<_MessageRow> {
                         key: ValueKey('retry-${message.id}'),
                         tooltip: appText('Retry message'),
                         onPressed: widget.retryEnabled ? widget.onRetry : null,
-                        icon: const Icon(Icons.refresh_rounded, size: 20),
+                        icon: const Icon(LucideIcons300.refreshCw, size: 20),
                         color: _accent,
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints.tightFor(
@@ -5733,57 +6002,69 @@ class _MessageRowState extends State<_MessageRow> {
                                   ),
                                   child: _isEditing
                                       ? _buildInlineEditor(context)
-                                      : MarkdownBody(
-                                          data: message.content,
-                                          selectable: true,
-                                          builders: {
-                                            'pre': _CodeBlockBuilder()
-                                          },
-                                          styleSheet:
-                                              MarkdownStyleSheet.fromTheme(
-                                            Theme.of(context),
-                                          ).copyWith(
-                                            p: const TextStyle(
-                                              color: _text,
-                                              fontSize: 14,
-                                              height: 1.4,
-                                            ),
-                                            pPadding: EdgeInsets.zero,
-                                            h1: const TextStyle(
-                                              color: _text,
-                                              fontSize: 20,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                            h2: const TextStyle(
-                                              color: _text,
-                                              fontSize: 18,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                            h3: const TextStyle(
-                                              color: _text,
-                                              fontSize: 16,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                            code: const TextStyle(
-                                              color: _text,
-                                              backgroundColor:
-                                                  Color(0xFF343A46),
-                                              fontFamily: 'monospace',
-                                              fontSize: 13,
-                                            ),
-                                            codeblockDecoration:
-                                                const BoxDecoration(),
-                                            blockquoteDecoration:
-                                                const BoxDecoration(
-                                              border: Border(
-                                                left: BorderSide(
-                                                  color: Color(0xFF596273),
-                                                  width: 3,
+                                      : emojiOnlyMessage != null
+                                          ? _AnimatedEmojiMessage(
+                                              key: ValueKey(
+                                                'animated-emoji-${message.id}',
+                                              ),
+                                              emoji: emojiOnlyMessage,
+                                            )
+                                          : MarkdownBody(
+                                              data: message.content,
+                                              selectable: true,
+                                              inlineSyntaxes: [
+                                                _EmojiMarkdownSyntax(),
+                                              ],
+                                              builders: {
+                                                'pre': _CodeBlockBuilder(),
+                                                'saraEmoji':
+                                                    _MarkdownEmojiBuilder(),
+                                              },
+                                              styleSheet:
+                                                  MarkdownStyleSheet.fromTheme(
+                                                Theme.of(context),
+                                              ).copyWith(
+                                                p: const TextStyle(
+                                                  color: _text,
+                                                  fontSize: 14,
+                                                  height: 1.4,
+                                                ),
+                                                pPadding: EdgeInsets.zero,
+                                                h1: const TextStyle(
+                                                  color: _text,
+                                                  fontSize: 20,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                                h2: const TextStyle(
+                                                  color: _text,
+                                                  fontSize: 18,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                                h3: const TextStyle(
+                                                  color: _text,
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                                code: const TextStyle(
+                                                  color: _text,
+                                                  backgroundColor:
+                                                      Color(0xFF343A46),
+                                                  fontFamily: 'monospace',
+                                                  fontSize: 13,
+                                                ),
+                                                codeblockDecoration:
+                                                    const BoxDecoration(),
+                                                blockquoteDecoration:
+                                                    const BoxDecoration(
+                                                  border: Border(
+                                                    left: BorderSide(
+                                                      color: Color(0xFF596273),
+                                                      width: 3,
+                                                    ),
+                                                  ),
                                                 ),
                                               ),
                                             ),
-                                          ),
-                                        ),
                                 ),
                               ),
                             AnimatedSize(
@@ -5805,10 +6086,10 @@ class _MessageRowState extends State<_MessageRow> {
                                                 ? widget.onDelete
                                                 : null,
                                             icon: const Icon(
-                                              Icons.delete_rounded,
+                                              LucideIcons300.trash2,
                                               size: 20,
                                             ),
-                                            color: const Color(0xFFFF8585),
+                                            color: _muted,
                                             visualDensity:
                                                 VisualDensity.compact,
                                             constraints:
@@ -5819,12 +6100,11 @@ class _MessageRowState extends State<_MessageRow> {
                                             style: IconButton.styleFrom(
                                               backgroundColor:
                                                   Colors.transparent,
-                                              foregroundColor:
-                                                  const Color(0xFFFF8585),
+                                              foregroundColor: _muted,
                                               hoverColor:
-                                                  const Color(0x33472D32),
+                                                  const Color(0x22343A46),
                                               disabledForegroundColor:
-                                                  const Color(0xFF6D5054),
+                                                  _muted.withValues(alpha: .5),
                                             ),
                                             padding: EdgeInsets.zero,
                                           ),
@@ -5836,8 +6116,8 @@ class _MessageRowState extends State<_MessageRow> {
                                             onPressed: _copyMessage,
                                             icon: Icon(
                                               _isCopied
-                                                  ? Icons.check_rounded
-                                                  : Icons.copy_rounded,
+                                                  ? LucideIcons300.check
+                                                  : LucideIcons300.copy,
                                               size: 16,
                                             ),
                                             color: _muted,
@@ -5851,7 +6131,7 @@ class _MessageRowState extends State<_MessageRow> {
                                             style: IconButton.styleFrom(
                                               backgroundColor:
                                                   Colors.transparent,
-                                              foregroundColor: _text,
+                                              foregroundColor: _muted,
                                               hoverColor:
                                                   const Color(0x22343A46),
                                             ),
@@ -5864,10 +6144,10 @@ class _MessageRowState extends State<_MessageRow> {
                                                 ? _startEditing
                                                 : null,
                                             icon: const Icon(
-                                              Icons.edit_rounded,
+                                              LucideIcons300.pencil,
                                               size: 20,
                                             ),
-                                            color: const Color(0xFFB8C8E6),
+                                            color: _muted,
                                             visualDensity:
                                                 VisualDensity.compact,
                                             constraints:
@@ -5878,8 +6158,7 @@ class _MessageRowState extends State<_MessageRow> {
                                             style: IconButton.styleFrom(
                                               backgroundColor:
                                                   Colors.transparent,
-                                              foregroundColor:
-                                                  const Color(0xFFB8C8E6),
+                                              foregroundColor: _muted,
                                               hoverColor:
                                                   const Color(0x22343A46),
                                             ),
@@ -6011,27 +6290,37 @@ class _MessageRowState extends State<_MessageRow> {
               const SizedBox(height: 8),
             ],
             if (message.content.trim().isNotEmpty)
-              MarkdownBody(
-                key: ValueKey('assistant-message-content-${message.id}'),
-                data: message.content,
-                selectable: true,
-                builders: {'pre': _CodeBlockBuilder()},
-                styleSheet:
-                    MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-                  p: const TextStyle(
-                    color: _text,
-                    fontSize: 14,
-                    height: 1.75,
-                  ),
-                  code: const TextStyle(
-                    color: _text,
-                    backgroundColor: _surfaceRaised,
-                    fontFamily: 'monospace',
-                    fontSize: 13,
-                  ),
-                  codeblockDecoration: const BoxDecoration(),
-                ),
-              ),
+              emojiOnlyMessage != null
+                  ? _AnimatedEmojiMessage(
+                      key: ValueKey('animated-emoji-${message.id}'),
+                      emoji: emojiOnlyMessage,
+                    )
+                  : MarkdownBody(
+                      key: ValueKey('assistant-message-content-${message.id}'),
+                      data: message.content,
+                      selectable: true,
+                      inlineSyntaxes: [_EmojiMarkdownSyntax()],
+                      builders: {
+                        'pre': _CodeBlockBuilder(),
+                        'saraEmoji': _MarkdownEmojiBuilder(),
+                      },
+                      styleSheet: MarkdownStyleSheet.fromTheme(
+                        Theme.of(context),
+                      ).copyWith(
+                        p: const TextStyle(
+                          color: _text,
+                          fontSize: 14,
+                          height: 1.75,
+                        ),
+                        code: const TextStyle(
+                          color: _text,
+                          backgroundColor: _surfaceRaised,
+                          fontFamily: 'monospace',
+                          fontSize: 13,
+                        ),
+                        codeblockDecoration: const BoxDecoration(),
+                      ),
+                    ),
             ..._buildLinkPreviews(message.content),
             if (!waitingForTerminalReply) ...[
               const SizedBox(height: 4),
@@ -6079,7 +6368,8 @@ class _MessageRowState extends State<_MessageRow> {
                     const SizedBox(width: 4),
                   ],
                   _IconButton(
-                    icon: _isCopied ? Icons.check_rounded : Icons.copy_rounded,
+                    icon:
+                        _isCopied ? LucideIcons300.check : LucideIcons300.copy,
                     tooltip: appText(_isCopied ? 'Copied' : 'Copy'),
                     onPressed: _copyMessage,
                     size: 18,
@@ -6087,7 +6377,7 @@ class _MessageRowState extends State<_MessageRow> {
                   const SizedBox(width: 7),
                   _IconButton(
                     key: ValueKey('like-${message.id}'),
-                    icon: Icons.thumb_up_alt_outlined,
+                    icon: LucideIcons300.thumbsUp,
                     tooltip:
                         appText(widget.feedbackRating == 1 ? 'Liked' : 'Like'),
                     color: widget.feedbackRating == 1
@@ -6101,7 +6391,7 @@ class _MessageRowState extends State<_MessageRow> {
                   const SizedBox(width: 7),
                   _IconButton(
                     key: ValueKey('dislike-${message.id}'),
-                    icon: Icons.thumb_down_alt_outlined,
+                    icon: LucideIcons300.thumbsDown,
                     tooltip: appText(
                         widget.feedbackRating == -1 ? 'Disliked' : 'Dislike'),
                     color: widget.feedbackRating == -1
@@ -6114,10 +6404,27 @@ class _MessageRowState extends State<_MessageRow> {
                     size: 18,
                   ),
                   const SizedBox(width: 7),
+                  _AssistantReactionControl(
+                    key: ValueKey('reaction-${message.id}'),
+                    reaction: widget.reaction,
+                    enabled: widget.feedbackEnabled &&
+                        widget.feedbackUserMessageId != null,
+                    onSelected: (reaction) {
+                      final userMessageId = widget.feedbackUserMessageId;
+                      if (userMessageId != null) {
+                        widget.onSetReaction(
+                          userMessageId,
+                          message.id,
+                          reaction,
+                        );
+                      }
+                    },
+                  ),
+                  const SizedBox(width: 7),
                   _IconButton(
                     key: ValueKey('speech-${message.id}'),
-                    icon: Icons.volume_up_outlined,
-                    activeIcon: Icons.volume_up_rounded,
+                    icon: LucideIcons300.volume2,
+                    activeIcon: LucideIcons300.volume2,
                     tooltip: appText(
                       widget.isSpeechPlaying
                           ? 'Stop speech'
@@ -6138,7 +6445,7 @@ class _MessageRowState extends State<_MessageRow> {
                   const Spacer(),
                   _IconButton(
                     key: ValueKey('regenerate-${message.id}'),
-                    icon: Icons.refresh_rounded,
+                    icon: LucideIcons300.refreshCw,
                     tooltip: appText('Regenerate'),
                     onPressed:
                         widget.regenerateEnabled ? widget.onRegenerate : null,
@@ -6355,7 +6662,9 @@ class _CodeBlockState extends State<_CodeBlock> {
                             width: 32, height: 32),
                         padding: EdgeInsets.zero,
                         icon: Icon(
-                          _isCopied ? Icons.check_rounded : Icons.copy_rounded,
+                          _isCopied
+                              ? LucideIcons300.check
+                              : LucideIcons300.copy,
                           size: 15,
                         ),
                       ),
@@ -6661,7 +6970,7 @@ class _LinkPreviewCardState extends State<_LinkPreviewCard> {
                     }
                   },
                   icon: Icon(
-                    isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                    isPlaying ? LucideIcons300.pause : LucideIcons300.play,
                   ),
                 );
               },
@@ -6777,7 +7086,9 @@ class _ComposerState extends State<_Composer> {
   bool _isPastingClipboard = false;
   final List<ChatAttachment> _attachments = [];
   final _attachmentLink = LayerLink();
+  final _emojiLink = LayerLink();
   OverlayEntry? _attachmentMenu;
+  OverlayEntry? _emojiPicker;
 
   @override
   void initState() {
@@ -7025,6 +7336,8 @@ class _ComposerState extends State<_Composer> {
     widget.controller.removeListener(_handleInputChanged);
     _attachmentMenu?.remove();
     _attachmentMenu = null;
+    _emojiPicker?.remove();
+    _emojiPicker = null;
     super.dispose();
   }
 
@@ -7033,6 +7346,7 @@ class _ComposerState extends State<_Composer> {
       _closeAttachmentMenu();
       return;
     }
+    _closeEmojiPicker();
 
     _attachmentMenu = OverlayEntry(
       builder: (context) => Stack(
@@ -7076,6 +7390,65 @@ class _ComposerState extends State<_Composer> {
     );
     Overlay.of(context).insert(_attachmentMenu!);
     setState(() {});
+  }
+
+  void _toggleEmojiPicker() {
+    if (_emojiPicker != null) {
+      _closeEmojiPicker();
+      return;
+    }
+    _closeAttachmentMenu();
+
+    _emojiPicker = OverlayEntry(
+      builder: (context) => Stack(
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _closeEmojiPicker,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          CompositedTransformFollower(
+            link: _emojiLink,
+            showWhenUnlinked: false,
+            targetAnchor: Alignment.topLeft,
+            followerAnchor: Alignment.bottomLeft,
+            offset: const Offset(0, -12),
+            child: _EmojiPicker(
+              onSelected: _insertEmoji,
+            ),
+          ),
+        ],
+      ),
+    );
+    Overlay.of(context).insert(_emojiPicker!);
+    setState(() {});
+  }
+
+  void _closeEmojiPicker() {
+    final picker = _emojiPicker;
+    if (picker == null) return;
+    picker.remove();
+    _emojiPicker = null;
+    if (mounted) setState(() {});
+  }
+
+  void _insertEmoji(String emoji) {
+    final controller = widget.controller;
+    final selection = controller.selection;
+    final start = selection.isValid
+        ? selection.start.clamp(0, controller.text.length).toInt()
+        : controller.text.length;
+    final end = selection.isValid
+        ? selection.end.clamp(0, controller.text.length).toInt()
+        : controller.text.length;
+    final updatedText = controller.text.replaceRange(start, end, emoji);
+    controller.value = TextEditingValue(
+      text: updatedText,
+      selection: TextSelection.collapsed(offset: start + emoji.length),
+    );
+    widget.focusNode.requestFocus();
   }
 
   void _closeAttachmentMenu() {
@@ -7175,6 +7548,8 @@ class _ComposerState extends State<_Composer> {
   void _submitMessage() {
     final text = widget.controller.text;
     if (text.trim().isEmpty && _attachments.isEmpty) return;
+    _closeEmojiPicker();
+    _closeAttachmentMenu();
     widget.onSend(
       text,
       List<ChatAttachment>.unmodifiable(_attachments),
@@ -7225,7 +7600,7 @@ class _ComposerState extends State<_Composer> {
                         border: Border.all(color: const Color(0xFF55565B)),
                       ),
                       padding: EdgeInsets.fromLTRB(
-                        compact ? 12 : 18,
+                        12,
                         compact ? 10 : 17,
                         12,
                         compact ? 8 : 11,
@@ -7302,30 +7677,70 @@ class _ComposerState extends State<_Composer> {
                           SizedBox(height: compact ? 6 : 14),
                           Row(
                             children: [
-                              CompositedTransformTarget(
-                                link: _attachmentLink,
-                                child: Tooltip(
-                                  message: appText('Add attachment'),
-                                  child: IconButton(
-                                    key: const ValueKey(
-                                      'composer-attachment-button',
+                              SizedBox(
+                                width: 36,
+                                height: 48,
+                                child: CompositedTransformTarget(
+                                  link: _attachmentLink,
+                                  child: Tooltip(
+                                    message: appText('Add attachment'),
+                                    child: IconButton(
+                                      key: const ValueKey(
+                                        'composer-attachment-button',
+                                      ),
+                                      onPressed: _toggleAttachmentMenu,
+                                      icon: Icon(
+                                        _attachmentMenu == null
+                                            ? LucideIcons300.plus
+                                            : LucideIcons300.x,
+                                        size: 26,
+                                        color: _text,
+                                      ),
+                                      style: IconButton.styleFrom(
+                                        backgroundColor: _surfaceRaised,
+                                        foregroundColor: _text,
+                                        padding: EdgeInsets.zero,
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                        minimumSize: const Size(36, 36),
+                                        fixedSize: const Size(36, 36),
+                                        shape: const CircleBorder(
+                                          side: BorderSide.none,
+                                        ),
+                                      ),
                                     ),
-                                    onPressed: _toggleAttachmentMenu,
-                                    icon: Icon(
-                                      _attachmentMenu == null
-                                          ? Icons.add_rounded
-                                          : Icons.close_rounded,
-                                      size: 26,
-                                      color: _text,
-                                    ),
-                                    style: IconButton.styleFrom(
-                                      backgroundColor: _surfaceRaised,
-                                      foregroundColor: _text,
-                                      padding: EdgeInsets.zero,
-                                      minimumSize: const Size(40, 40),
-                                      fixedSize: const Size(40, 40),
-                                      shape: const CircleBorder(
-                                        side: BorderSide.none,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              SizedBox(
+                                width: 36,
+                                height: 48,
+                                child: CompositedTransformTarget(
+                                  link: _emojiLink,
+                                  child: Tooltip(
+                                    message: appText('Choose emoji'),
+                                    child: IconButton(
+                                      key: const ValueKey(
+                                        'emoji-picker-button',
+                                      ),
+                                      onPressed: _toggleEmojiPicker,
+                                      icon: Icon(
+                                        LucideIcons300.smile,
+                                        size: 20,
+                                        color: Colors.white,
+                                      ),
+                                      style: IconButton.styleFrom(
+                                        backgroundColor: Colors.transparent,
+                                        overlayColor: Colors.transparent,
+                                        padding: EdgeInsets.zero,
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                        minimumSize: const Size(36, 36),
+                                        fixedSize: const Size(36, 36),
+                                        shape: const CircleBorder(
+                                          side: BorderSide.none,
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -7335,8 +7750,8 @@ class _ComposerState extends State<_Composer> {
                               _ComposerMode(
                                 key: const ValueKey('composer-mode-button'),
                                 icon: _unwindMode
-                                    ? Icons.volume_up_rounded
-                                    : Icons.volume_off_rounded,
+                                    ? LucideIcons300.volume2
+                                    : LucideIcons300.volumeX,
                                 label: appText(_unwindMode ? 'Unwind' : 'Vent'),
                                 selected: _unwindMode,
                                 onTap: () {
@@ -7350,7 +7765,7 @@ class _ComposerState extends State<_Composer> {
                                   tooltip: appText('Settings'),
                                   onPressed: widget.onOpenSettings,
                                   icon: const Icon(
-                                    Icons.settings_outlined,
+                                    LucideIcons300.settings,
                                   ),
                                   color: _muted,
                                   visualDensity: VisualDensity.compact,
@@ -7405,7 +7820,7 @@ class _ComposerState extends State<_Composer> {
                                             ),
                                           )
                                         : const Icon(
-                                            Icons.arrow_upward_rounded,
+                                            LucideIcons300.arrowUp,
                                             key: ValueKey(
                                               'submit-message-icon',
                                             ),
@@ -7482,6 +7897,413 @@ class _ComposerMode extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _EmojiChoice {
+  const _EmojiChoice(this.emoji, this.category);
+
+  final emoji_picker.Emoji emoji;
+  final String category;
+
+  String get characters => emoji.emoji;
+}
+
+final _emojiChoices = emojiSetEnglish
+    .expand((group) => group.emoji.map(
+          (item) => _EmojiChoice(item, group.category.name),
+        ))
+    .toList(growable: false);
+
+class _EmojiPicker extends StatefulWidget {
+  const _EmojiPicker({
+    required this.onSelected,
+  });
+
+  final ValueChanged<String> onSelected;
+
+  @override
+  State<_EmojiPicker> createState() => _EmojiPickerState();
+}
+
+class _EmojiPickerState extends State<_EmojiPicker> {
+  static const _categories = [
+    ('All', 'All'),
+    ('SMILEYS', 'Faces'),
+    ('ANIMALS', 'Animals & nature'),
+    ('FOODS', 'Food & drink'),
+    ('ACTIVITIES', 'Activities'),
+    ('TRAVEL', 'Travel & places'),
+    ('OBJECTS', 'Objects'),
+    ('SYMBOLS', 'Symbols'),
+    ('FLAGS', 'Flags'),
+  ];
+
+  String _category = 'All';
+  String _query = '';
+
+  List<_EmojiChoice> get _filteredChoices {
+    final query = _query.trim().toLowerCase();
+    return _emojiChoices
+        .where((choice) =>
+            (query.isNotEmpty ||
+                _category == 'All' ||
+                choice.category == _category) &&
+            (query.isEmpty ||
+                choice.emoji.keywords
+                    .any((keyword) => keyword.toLowerCase().contains(query)) ||
+                choice.characters.contains(query)))
+        .toList(growable: false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final width = math.min(348.0, MediaQuery.sizeOf(context).width - 32);
+    final choices = _filteredChoices;
+    return Material(
+      color: const Color(0xFF25272C),
+      borderRadius: BorderRadius.circular(16),
+      elevation: 16,
+      child: Container(
+        key: const ValueKey('emoji-picker-panel'),
+        width: width,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF25272C),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFF4A4D55)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              height: 38,
+              child: TextField(
+                key: const ValueKey('emoji-picker-search'),
+                onChanged: (value) => setState(() => _query = value),
+                style: const TextStyle(color: _text, fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: appText('Search emoji'),
+                  hintStyle: const TextStyle(color: _muted, fontSize: 13),
+                  prefixIcon: const Icon(LucideIcons300.search, size: 16),
+                  prefixIconColor: _muted,
+                  filled: true,
+                  fillColor: _surface,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: _border),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: _border),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(10),
+                    borderSide: const BorderSide(color: _accent),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 32,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: _categories.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 4),
+                itemBuilder: (context, index) {
+                  final (category, label) = _categories[index];
+                  final selected = _category == category && _query.isEmpty;
+                  return TextButton(
+                    onPressed: () => setState(() => _category = category),
+                    style: TextButton.styleFrom(
+                      backgroundColor: selected
+                          ? const Color(0xFF263650)
+                          : Colors.transparent,
+                      foregroundColor: selected ? _accent : _muted,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(0, 30),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                    ),
+                    child: Text(
+                      appText(label),
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 4),
+            SizedBox(
+              height: 210,
+              child: choices.isEmpty
+                  ? Center(
+                      child: Text(
+                        appText('No emoji found'),
+                        style: const TextStyle(color: _muted, fontSize: 12),
+                      ),
+                    )
+                  : GridView.builder(
+                      key: const ValueKey('emoji-picker-grid'),
+                      padding: EdgeInsets.zero,
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 8,
+                        mainAxisSpacing: 2,
+                        crossAxisSpacing: 2,
+                      ),
+                      itemCount: choices.length,
+                      itemBuilder: (context, index) {
+                        final choice = choices[index];
+                        return IconButton(
+                          key: ValueKey(
+                              'emoji-picker-item-${choice.characters}'),
+                          onPressed: () => widget.onSelected(choice.characters),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints.expand(),
+                          icon: Text(
+                            choice.characters,
+                            style: const TextStyle(
+                              fontFamily: _emojiFontFamily,
+                              fontSize: 22,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AssistantReactionControl extends StatefulWidget {
+  const _AssistantReactionControl({
+    super.key,
+    required this.reaction,
+    required this.enabled,
+    required this.onSelected,
+  });
+
+  final String? reaction;
+  final bool enabled;
+  final ValueChanged<String?> onSelected;
+
+  @override
+  State<_AssistantReactionControl> createState() =>
+      _AssistantReactionControlState();
+}
+
+class _AssistantReactionControlState extends State<_AssistantReactionControl> {
+  static const _quickReactions = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
+  final _link = LayerLink();
+  OverlayEntry? _overlayEntry;
+  Timer? _closeTimer;
+  bool _showFullPicker = false;
+  bool _showFullPickerBelow = false;
+  bool _pinnedOpen = false;
+
+  void _openQuickReactions() {
+    if (!widget.enabled) return;
+    _closeTimer?.cancel();
+    if (_overlayEntry != null) {
+      if (!_showFullPicker) _overlayEntry!.markNeedsBuild();
+      return;
+    }
+    _showFullPicker = false;
+    _overlayEntry = OverlayEntry(builder: _buildOverlay);
+    Overlay.of(context).insert(_overlayEntry!);
+  }
+
+  void _handleTap() {
+    if (_overlayEntry != null && _pinnedOpen && !_showFullPicker) {
+      _closePicker();
+      return;
+    }
+    _pinnedOpen = true;
+    _openQuickReactions();
+  }
+
+  void _openFullPicker() {
+    _closeTimer?.cancel();
+    final target = context.findRenderObject();
+    if (target is RenderBox && target.hasSize) {
+      _showFullPickerBelow = target.localToGlobal(Offset.zero).dy < 330;
+    }
+    _pinnedOpen = true;
+    _showFullPicker = true;
+    _overlayEntry?.markNeedsBuild();
+  }
+
+  void _selectReaction(String reaction) {
+    _closePicker();
+    widget.onSelected(widget.reaction == reaction ? null : reaction);
+  }
+
+  void _scheduleClose() {
+    if (_pinnedOpen || _showFullPicker) return;
+    _closeTimer?.cancel();
+    _closeTimer = Timer(const Duration(milliseconds: 220), _closePicker);
+  }
+
+  void _closePicker() {
+    _closeTimer?.cancel();
+    _closeTimer = null;
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+    _showFullPicker = false;
+    _showFullPickerBelow = false;
+    _pinnedOpen = false;
+  }
+
+  Widget _buildOverlay(BuildContext context) {
+    final showBelow = _showFullPicker && _showFullPickerBelow;
+    return Stack(
+      children: [
+        if (_showFullPicker)
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _closePicker,
+              child: const SizedBox.expand(),
+            ),
+          ),
+        CompositedTransformFollower(
+          link: _link,
+          showWhenUnlinked: false,
+          targetAnchor: showBelow ? Alignment.bottomLeft : Alignment.topLeft,
+          followerAnchor: showBelow ? Alignment.topLeft : Alignment.bottomLeft,
+          offset: Offset(0, showBelow ? 8 : -8),
+          child: _showFullPicker
+              ? _EmojiPicker(onSelected: _selectReaction)
+              : MouseRegion(
+                  onEnter: (_) {
+                    _closeTimer?.cancel();
+                    _closeTimer = null;
+                  },
+                  onExit: (_) => _scheduleClose(),
+                  child: _QuickReactionCapsule(
+                    reactions: _quickReactions,
+                    selectedReaction: widget.reaction,
+                    onSelected: _selectReaction,
+                    onMore: _openFullPicker,
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  void dispose() {
+    _closeTimer?.cancel();
+    _overlayEntry?.remove();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CompositedTransformTarget(
+      link: _link,
+      child: MouseRegion(
+        onEnter: (_) => _openQuickReactions(),
+        onExit: (_) => _scheduleClose(),
+        child: IconButton(
+          key: const ValueKey('assistant-reaction-button'),
+          tooltip: appText('Reaction'),
+          onPressed: widget.enabled ? _handleTap : null,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints.tightFor(width: 28, height: 30),
+          icon: widget.reaction == null
+              ? Icon(
+                  LucideIcons300.smile,
+                  size: 18,
+                  color: widget.enabled ? _muted : _muted.withValues(alpha: .5),
+                )
+              : Text(
+                  widget.reaction!,
+                  style: const TextStyle(
+                    fontFamily: _emojiFontFamily,
+                    fontSize: 17,
+                  ),
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+class _QuickReactionCapsule extends StatelessWidget {
+  const _QuickReactionCapsule({
+    required this.reactions,
+    required this.selectedReaction,
+    required this.onSelected,
+    required this.onMore,
+  });
+
+  final List<String> reactions;
+  final String? selectedReaction;
+  final ValueChanged<String> onSelected;
+  final VoidCallback onMore;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xFF25272C),
+      elevation: 12,
+      shape: const StadiumBorder(
+        side: BorderSide(color: Color(0xFF4A4D55)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Row(
+          key: const ValueKey('assistant-reaction-capsule'),
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final reaction in reactions)
+              InkWell(
+                key: ValueKey('quick-reaction-$reaction'),
+                borderRadius: BorderRadius.circular(20),
+                onTap: () => onSelected(reaction),
+                child: Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: selectedReaction == reaction
+                        ? const Color(0xFF3B4351)
+                        : Colors.transparent,
+                    shape: BoxShape.circle,
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    reaction,
+                    style: const TextStyle(
+                      fontFamily: _emojiFontFamily,
+                      fontSize: 19,
+                    ),
+                  ),
+                ),
+              ),
+            IconButton(
+              key: const ValueKey('more-reactions-button'),
+              tooltip: appText('More emoji'),
+              onPressed: onMore,
+              icon: const Icon(LucideIcons300.plus, size: 18),
+              color: _text,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+            ),
+          ],
         ),
       ),
     );
@@ -7853,7 +8675,7 @@ class _AttachmentGridState extends State<_AttachmentGrid> {
                     width: 24,
                     height: 24,
                     child: Icon(
-                      Icons.close_rounded,
+                      LucideIcons300.x,
                       color: Colors.white,
                       size: 15,
                     ),
@@ -7926,13 +8748,13 @@ class _AttachmentFileTile extends StatelessWidget {
       alignment: Alignment.center,
       child: missing
           ? const Icon(
-              Icons.warning_amber_rounded,
+              LucideIcons300.triangleAlert,
               color: Color(0xFFFFC857),
               size: 34,
             )
           : isVideo
               ? const Icon(
-                  Icons.play_circle_outline_rounded,
+                  LucideIcons300.circlePlay,
                   color: Colors.white,
                   size: 34,
                 )
@@ -8022,7 +8844,7 @@ class _VideoAttachmentTile extends StatelessWidget {
           const ColoredBox(color: Color(0xFF1D2129)),
         const Center(
           child: Icon(
-            Icons.play_circle_fill_rounded,
+            LucideIcons300.circlePlay,
             color: Colors.white,
             size: 30,
             shadows: [Shadow(color: Colors.black87, blurRadius: 5)],
@@ -8065,7 +8887,7 @@ class _ComposerFileAttachmentTile extends StatelessWidget {
             alignment: Alignment.center,
             child: missing
                 ? const Icon(
-                    Icons.warning_amber_rounded,
+                    LucideIcons300.triangleAlert,
                     color: Colors.white,
                     size: 21,
                   )
@@ -8286,7 +9108,7 @@ class _AttachmentPreviewDialogState extends State<_AttachmentPreviewDialog> {
                   key: const ValueKey('close-attachment-preview'),
                   tooltip: appText('Close preview'),
                   onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.close_rounded),
+                  icon: const Icon(LucideIcons300.x),
                 ),
               ),
             ],
@@ -8328,7 +9150,7 @@ class _MissingAttachmentPreview extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Icon(
-          Icons.warning_amber_rounded,
+          LucideIcons300.triangleAlert,
           color: Color(0xFFD99000),
           size: 44,
         ),
@@ -8548,7 +9370,7 @@ class _CameraCaptureDialogState extends State<_CameraCaptureDialog> {
                     fixedSize: const Size(40, 40),
                     padding: EdgeInsets.zero,
                   ),
-                  icon: const Icon(Icons.close_rounded, size: 22),
+                  icon: const Icon(LucideIcons300.x, size: 22),
                 ),
               ),
             ],
@@ -8624,17 +9446,17 @@ class _AttachmentMenu extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _AttachmentOption(
-              icon: Icons.photo_camera_outlined,
+              icon: LucideIcons300.camera,
               label: appText('Camera'),
               onTap: onOpenCamera,
             ),
             _AttachmentOption(
-              icon: Icons.image_outlined,
+              icon: LucideIcons300.image,
               label: appText('Photo'),
               onTap: onPickMedia,
             ),
             _AttachmentOption(
-              icon: Icons.attach_file_rounded,
+              icon: LucideIcons300.paperclip,
               label: appText('File'),
               onTap: onPickFile,
             ),
@@ -8896,7 +9718,7 @@ class _ScrollDownIconPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = _accent
+      ..color = Colors.white
       ..strokeWidth = 2.4
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round

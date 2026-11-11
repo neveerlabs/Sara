@@ -9,6 +9,7 @@ environment:
 dependencies:
   crypto: ^3.0.8
   desktop_drop: ^0.8.0
+  emoji_picker_flutter: ^4.5.4
   file_picker: ^13.3.2
   flutter:
     sdk: flutter
@@ -20,6 +21,7 @@ dependencies:
   html: ^0.15.7
   image: ^4.5.4
   http: ^1.6.0
+  lucide_icons_flutter: ^4.0.3
   markdown: ^7.3.1
   media_kit: ^1.2.6
   media_kit_libs_linux: ^1.2.1

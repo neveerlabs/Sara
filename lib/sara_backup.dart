@@ -16,7 +16,8 @@ class BackupRestoreResult {
 
 class SaraBackupService {
   static const _format = 'sara-desktop-backup';
-  static const _version = 1;
+  static const _version = 2;
+  static const _previousVersion = 1;
   static const _uuid = Uuid();
 
   SaraBackupService({
@@ -77,7 +78,7 @@ class SaraBackupService {
     final decoded = jsonDecode(utf8.decode(backupBytes));
     if (decoded is! Map ||
         decoded['format'] != _format ||
-        decoded['version'] != _version ||
+        !{_previousVersion, _version}.contains(decoded['version']) ||
         decoded['database'] is! Map ||
         decoded['attachment_files'] is! Map) {
       throw const FormatException('This is not a supported Sara backup file.');

@@ -1372,6 +1372,147 @@ void main() {
       expect(memories.single.startAtUtc, _userMessage.createdAtUtc);
     });
 
+    test('passes a brief reply handoff to the background thinker', () async {
+      SharedPreferences.setMockInitialValues({});
+      final preferences = await SharedPreferences.getInstance();
+      final config = _MemoryAiConfigStore()
+        ..apiKeys = ['handoff-key']
+        ..values['ai_model'] = 'gemini-3.5-flash-lite';
+      final history = [_userMessage];
+      Map<String, dynamic>? requestBody;
+      var requests = 0;
+      SaraResponseHandoff? receivedHandoff;
+      final service = GeminiReplyService(
+        configStore: config,
+        preferences: preferences,
+        client: MockClient((request) async {
+          requests++;
+          requestBody = jsonDecode(request.body) as Map<String, dynamic>;
+          if (requests == 1) {
+            final declarations =
+                requestBody!['tools'][0]['functionDeclarations'] as List;
+            expect(
+              declarations.any((tool) => tool['name'] == 'share_reply_handoff'),
+              isTrue,
+            );
+            final instruction =
+                requestBody!['systemInstruction']['parts'][0]['text'] as String;
+            expect(instruction,
+                contains('Do not include hidden chain-of-thought'));
+            return http.Response(
+              'data: {"candidates":[{"content":{"parts":[{"functionCall":'
+              '{"name":"share_reply_handoff","args":{"userIntent":"Wants an update",'
+              '"responseApproach":"Explain the change briefly",'
+              '"openThread":"Check the result later"}}}]}}]}\n\n',
+              200,
+              headers: {'content-type': 'text/event-stream'},
+            );
+          }
+          return http.Response(
+            'data: {"candidates":[{"content":{"parts":[{"text":"Done."}]}}]}\n\n',
+            200,
+            headers: {'content-type': 'text/event-stream'},
+          );
+        }),
+      );
+
+      expect(
+        await service.generateReply(
+          history,
+          thinkingEnabled: false,
+          onResponseHandoff: (handoff) => receivedHandoff = handoff,
+        ),
+        'Done.',
+      );
+      expect(requests, 2);
+      expect(receivedHandoff?.userIntent, 'Wants an update');
+      expect(receivedHandoff?.responseApproach, 'Explain the change briefly');
+      expect(receivedHandoff?.openThread, 'Check the result later');
+    });
+
+    test('background request receives handoff and source IDs', () async {
+      SharedPreferences.setMockInitialValues({});
+      final preferences = await SharedPreferences.getInstance();
+      final config = _MemoryAiConfigStore()
+        ..apiKeys = ['background-handoff-key']
+        ..values['ai_model'] = 'gemini-3.5-flash-lite';
+      Map<String, dynamic>? requestBody;
+      final autonomyResponse = {
+        'candidates': [
+          {
+            'content': {
+              'parts': [
+                {
+                  'text': jsonEncode({
+                    'memoryQuery': '',
+                    'reflection': 'A brief private reflection.',
+                    'remember': false,
+                    'sourceMessageIds': [],
+                    'action': 'think',
+                    'nextCheckMinutes': 30,
+                    'message': '',
+                    'innerLife': {
+                      'mood': 'curious',
+                      'moodIntensity': 40,
+                      'energy': 70,
+                      'drives': {
+                        'connection': 50,
+                        'curiosity': 60,
+                        'autonomy': 50,
+                        'security': 50,
+                      },
+                    },
+                    'goalUpdates': [],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      };
+      final service = GeminiReplyService(
+        configStore: config,
+        preferences: preferences,
+        autonomyClientFactory: () => MockClient((request) async {
+          requestBody = jsonDecode(request.body) as Map<String, dynamic>;
+          return http.Response(
+            'data: ${jsonEncode(autonomyResponse)}\n\n',
+            200,
+            headers: {'content-type': 'text/event-stream'},
+          );
+        }),
+      );
+
+      await service.thinkAutonomously(
+        activeMessageIds: const ['source-user', 'source-reply'],
+        personalName: null,
+        innerLifeSummary: '{}',
+        currentGoals: const [],
+        responseHandoff: const SaraResponseHandoff(
+          userIntent: 'Wants an update',
+          responseApproach: 'Explain the change briefly',
+          openThread: 'Check the result later',
+          sourceMessageIds: ['source-user', 'source-reply'],
+        ),
+      );
+
+      final sentData =
+          jsonDecode(requestBody!['contents'][0]['parts'][0]['text'] as String)
+              as Map<String, dynamic>;
+      expect(
+        sentData['latestReplyHandoff'],
+        {
+          'userIntent': 'Wants an update',
+          'responseApproach': 'Explain the change briefly',
+          'openThread': 'Check the result later',
+          'sourceMessageIds': ['source-user', 'source-reply'],
+        },
+      );
+      final instruction =
+          requestBody!['systemInstruction']['parts'][0]['text'] as String;
+      expect(instruction, contains('not hidden chain-of-thought'));
+    });
+
     test('Sara searches saved private reflections only when she chooses',
         () async {
       SharedPreferences.setMockInitialValues({});
@@ -2068,6 +2209,25 @@ void main() {
     });
   });
 
+  test('reply handoffs are valid only on paths containing their sources', () {
+    const handoff = SaraResponseHandoff(
+      userIntent: 'Wants to discuss an update',
+      responseApproach: 'Answer directly',
+      sourceMessageIds: ['exchange-user', 'exchange-reply'],
+    );
+
+    expect(
+      handoff
+          .isValidForPath(['root-message', 'exchange-user', 'exchange-reply']),
+      isTrue,
+    );
+    expect(
+      handoff.isValidForPath(['root-message', 'another-branch']),
+      isFalse,
+    );
+    expect(handoff.isValidForPath(const []), isFalse);
+  });
+
   test('SQLite message store persists and orders messages by UTC time',
       () async {
     final directory = await Directory.systemTemp.createTemp('sara-db-test-');
@@ -2460,6 +2620,105 @@ void main() {
     expect(await store.loadFeedbackPreferenceSummary(), isNull);
   });
 
+  test('SQLite stores reactions beside feedback without replacing ratings',
+      () async {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+    final directory =
+        await Directory.systemTemp.createTemp('sara-reaction-feedback-');
+    final store = await SqliteMessageStore.openAtPath(
+      path.join(directory.path, 'message.sql'),
+    );
+    addTearDown(() async {
+      await store.close();
+      await directory.delete(recursive: true);
+    });
+
+    final user = _message(id: 'reaction-user', createdAtUtc: 100);
+    final response = _message(
+      id: 'reaction-response',
+      role: 'model',
+      createdAtUtc: 101,
+    );
+    await store.saveExchange([user, response]);
+
+    await store.saveAssistantReaction(user.id, response.id, '❤️');
+    expect(await store.loadAssistantReactions(), {response.id: '❤️'});
+    expect(await store.loadAssistantFeedback(), isEmpty);
+    expect(await store.loadFeedbackPreferenceSummary(), isNull);
+
+    await store.saveAssistantFeedback(user.id, response.id, 1);
+    expect(await store.loadAssistantFeedback(), {response.id: 1});
+    expect(await store.loadAssistantReactions(), {response.id: '❤️'});
+
+    await store.saveAssistantReaction(user.id, response.id, '😂');
+    expect(await store.loadAssistantReactions(), {response.id: '😂'});
+    await store.saveAssistantFeedback(user.id, response.id, null);
+    expect(await store.loadAssistantFeedback(), isEmpty);
+    expect(await store.loadAssistantReactions(), {response.id: '😂'});
+
+    await store.saveAssistantReaction(user.id, response.id, null);
+    expect(await store.loadAssistantReactions(), isEmpty);
+    expect(await store.loadFeedbackPreferenceSummary(), isNull);
+
+    await store.saveAssistantFeedback(user.id, response.id, 1);
+    await store.saveAssistantReaction(user.id, response.id, '❤️');
+    await store.clearMessages();
+    expect(await store.loadAssistantFeedback(), isEmpty);
+    expect(await store.loadAssistantReactions(), isEmpty);
+
+    await store.saveExchange([user, response]);
+    await store.saveAssistantFeedback(user.id, response.id, 1);
+    await store.saveAssistantReaction(user.id, response.id, '❤️');
+    await store.deleteMessages([response.id]);
+    expect(await store.loadAssistantFeedback(), isEmpty);
+    expect(await store.loadAssistantReactions(), isEmpty);
+  });
+
+  test('SQLite version 17 feedback migrates to include reactions', () async {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+    final directory = await Directory.systemTemp.createTemp('sara-migration-');
+    final databasePath = path.join(directory.path, 'message.sql');
+    final legacyDatabase = await databaseFactory.openDatabase(
+      databasePath,
+      options: OpenDatabaseOptions(
+        version: 17,
+        onCreate: (database, version) async {
+          await database.execute('''
+            CREATE TABLE assistant_feedback (
+              response_message_id TEXT PRIMARY KEY NOT NULL,
+              user_message_id TEXT NOT NULL,
+              rating INTEGER NOT NULL CHECK (rating IN (-1, 1)),
+              is_concise INTEGER NOT NULL,
+              has_list INTEGER NOT NULL,
+              has_code INTEGER NOT NULL,
+              updated_at_utc INTEGER NOT NULL
+            )
+          ''');
+        },
+      ),
+    );
+    await legacyDatabase.insert('assistant_feedback', {
+      'response_message_id': 'old-response',
+      'user_message_id': 'old-user',
+      'rating': 1,
+      'is_concise': 1,
+      'has_list': 0,
+      'has_code': 0,
+      'updated_at_utc': 101,
+    });
+    await legacyDatabase.close();
+
+    final store = await SqliteMessageStore.openAtPath(databasePath);
+    addTearDown(() async {
+      await store.close();
+      await directory.delete(recursive: true);
+    });
+    expect(await store.loadAssistantFeedback(), {'old-response': 1});
+    expect(await store.loadAssistantReactions(), isEmpty);
+  });
+
   test('Sara JSON backup restores database and attachment file data', () async {
     sqfliteFfiInit();
     databaseFactory = databaseFactoryFfi;
@@ -2573,14 +2832,20 @@ void main() {
       isTrue,
     );
     await store.saveAssistantFeedback(user.id, response.id, 1);
+    await store.saveAssistantReaction(user.id, response.id, '❤️');
     final backupBytes = await backupService.createBackup(store);
     final backupPayload = jsonDecode(utf8.decode(backupBytes)) as Map;
+    expect(backupPayload['version'], 2);
     expect((backupPayload['attachment_files'] as Map).length, 2);
     final backupTables = backupPayload['database'] as Map;
     expect((backupTables['sara_inner_life'] as List), hasLength(1));
     expect((backupTables['sara_inner_life_branch'] as List), hasLength(1));
     expect((backupTables['sara_private_thought'] as List), hasLength(1));
     expect((backupTables['sara_autonomy_goal'] as List), hasLength(1));
+    expect(
+      (backupTables['assistant_feedback'] as List).single['reaction'],
+      '❤️',
+    );
 
     await store.writePersonalName('Other');
     await store.saveMessage(_message(id: 'replacement', createdAtUtc: 200));
@@ -2640,6 +2905,20 @@ void main() {
       autonomyGoal.title,
     );
     expect(await store.loadAssistantFeedback(), {'backup-response': 1});
+    expect(await store.loadAssistantReactions(), {'backup-response': '❤️'});
+
+    final legacyPayload = jsonDecode(utf8.decode(backupBytes)) as Map;
+    legacyPayload['version'] = 1;
+    final legacyFeedbackRows =
+        (legacyPayload['database'] as Map)['assistant_feedback'] as List;
+    for (final row in legacyFeedbackRows) {
+      (row as Map).remove('reaction');
+    }
+    final legacyBytes =
+        Uint8List.fromList(utf8.encode(jsonEncode(legacyPayload)));
+    await backupService.restoreBackup(store, legacyBytes);
+    expect(await store.loadAssistantFeedback(), {'backup-response': 1});
+    expect(await store.loadAssistantReactions(), isEmpty);
   });
 
   test('Gemini receives only the summarized response feedback preference',
@@ -3157,6 +3436,19 @@ void main() {
     final restoredState = await store.loadSaraInnerLifeForPath(['a', 'b1']);
     expect(restoredState.selfReflection, deletedBranchState.selfReflection);
     expect(restoredState.sourceMessageIds, ['a', 'b1']);
+
+    await store.saveAssistantReaction('a', 'b1', '❤️');
+    final deletedResponseBranch = await store.loadSubtreeMessageIds('b1');
+    await store.deleteMessages(deletedResponseBranch);
+    expect(
+      (await store.loadActiveMessages()).map((message) => message.id),
+      ['a', 'b2', 'c2', 'd2'],
+    );
+    expect(
+      (await store.loadMessages()).map((message) => message.id),
+      ['a', 'b2', 'c2', 'd2'],
+    );
+    expect(await store.loadAssistantReactions(), isEmpty);
   });
 
   test('SQLite exposes edited user messages as navigable sibling branches',
