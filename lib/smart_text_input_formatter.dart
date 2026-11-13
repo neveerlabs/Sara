@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 class SmartTextInputFormatter extends TextInputFormatter {
   const SmartTextInputFormatter();
 
+  static final _letterPattern = RegExp(r'^\p{L}$', unicode: true);
   static const _simplePairs = <String, String>{
     '(': ')',
     '[': ']',
@@ -40,6 +41,14 @@ class SmartTextInputFormatter extends TextInputFormatter {
         change.inserted.length == 1) {
       final character = change.inserted;
       if (_markdownPairCharacters.contains(character)) {
+        final hasAdjacentCloser = oldValue.text.startsWith(
+          character,
+          insertionOffset,
+        );
+        if (!hasAdjacentCloser &&
+            _isAdjacentToLetter(oldValue.text, insertionOffset)) {
+          return newValue;
+        }
         return _pairOrExpandMarkdownDelimiter(
           oldValue,
           newValue,
@@ -59,6 +68,9 @@ class SmartTextInputFormatter extends TextInputFormatter {
 
       final closing = _simplePairs[character];
       if (closing != null) {
+        if (_isAdjacentToLetter(oldValue.text, insertionOffset)) {
+          return newValue;
+        }
         return _insertClosingPair(
           newValue,
           closing,
@@ -202,6 +214,43 @@ class SmartTextInputFormatter extends TextInputFormatter {
 
   bool _isClosingCharacter(String character) =>
       _simplePairs.values.contains(character);
+
+  bool _isAdjacentToLetter(String text, int offset) {
+    final before = _runeBefore(text, offset);
+    final after = _runeAfter(text, offset);
+    return (before != null && _letterPattern.hasMatch(before)) ||
+        (after != null && _letterPattern.hasMatch(after));
+  }
+
+  String? _runeBefore(String text, int offset) {
+    if (offset <= 0 || offset > text.length) return null;
+    var start = offset - 1;
+    final lastUnit = text.codeUnitAt(start);
+    if (_isLowSurrogate(lastUnit) &&
+        start > 0 &&
+        _isHighSurrogate(text.codeUnitAt(start - 1))) {
+      start--;
+    }
+    return text.substring(start, offset);
+  }
+
+  String? _runeAfter(String text, int offset) {
+    if (offset < 0 || offset >= text.length) return null;
+    var end = offset + 1;
+    final firstUnit = text.codeUnitAt(offset);
+    if (_isHighSurrogate(firstUnit) &&
+        end < text.length &&
+        _isLowSurrogate(text.codeUnitAt(end))) {
+      end++;
+    }
+    return text.substring(offset, end);
+  }
+
+  bool _isHighSurrogate(int codeUnit) =>
+      codeUnit >= 0xD800 && codeUnit <= 0xDBFF;
+
+  bool _isLowSurrogate(int codeUnit) =>
+      codeUnit >= 0xDC00 && codeUnit <= 0xDFFF;
 
   TextEditingValue _valueWithSelection(String text, int offset) {
     return TextEditingValue(

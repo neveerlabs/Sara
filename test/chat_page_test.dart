@@ -85,6 +85,46 @@ void main() {
     expect(sounds, ['assets/sound/send.mp3', 'assets/sound/received.mp3']);
   });
 
+  testWidgets('composer uses Shift+Enter for newlines and Enter to send', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final messageStore = _MemoryMessageStore();
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: messageStore,
+        replyService: _FakeReplyService(reply: 'A reply'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final composerInput = find.descendant(
+      of: find.byKey(const ValueKey('chat-composer')),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(composerInput, 'First line');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+
+    expect(
+      tester.widget<TextField>(composerInput).controller!.text,
+      'First line\n',
+    );
+    expect(messageStore.messages, isEmpty);
+
+    await tester.enterText(composerInput, 'First line\nSecond line');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    expect(messageStore.messages.first.content, 'First line\nSecond line');
+  });
+
   testWidgets('one search result remains inline in the chat', (tester) async {
     tester.view.physicalSize = const Size(1280, 800);
     tester.view.devicePixelRatio = 1;
@@ -3381,6 +3421,67 @@ void main() {
       contains(isA<SmartTextInputFormatter>()),
     );
   });
+
+  testWidgets(
+    'message editor uses Shift+Enter for newlines and Enter to save',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final messageStore = _MemoryMessageStore()
+        ..messages.add(
+          const ChatMessage(
+            id: 'keyboard-edit-user',
+            role: 'user',
+            content: 'Original',
+            timestamp: 'today',
+            createdAtUtc: 1,
+          ),
+        );
+      await tester.pumpWidget(
+        _testApp(messageStore: messageStore, replyService: _FakeReplyService()),
+      );
+      await tester.pumpAndSettle();
+
+      final userBubble = find.byKey(const ValueKey('user-message-bubble'));
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.moveTo(tester.getCenter(userBubble));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('edit-keyboard-edit-user')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      final editInput = find.byKey(
+        const ValueKey('edit-input-keyboard-edit-user'),
+      );
+      await tester.enterText(editInput, 'First line');
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+
+      expect(
+        tester.widget<TextField>(editInput).controller!.text,
+        'First line\n',
+      );
+      expect(messageStore.messages.single.content, 'Original');
+
+      await tester.enterText(editInput, 'First line\nSecond line');
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+
+      expect(
+        messageStore.messages.map((message) => message.content),
+        contains('First line\nSecond line'),
+      );
+      expect(
+        find.byKey(const ValueKey('edit-input-keyboard-edit-user')),
+        findsNothing,
+      );
+    },
+  );
 
   testWidgets('removes the stored user message when the AI request fails', (
     tester,

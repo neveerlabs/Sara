@@ -242,6 +242,38 @@ class _MarkdownEmojiBuilder extends MarkdownElementBuilder {
   }
 }
 
+KeyEventResult _handleEnterSubmission(
+  KeyEvent event,
+  TextEditingController controller,
+  VoidCallback onSubmit,
+) {
+  final isEnterKey =
+      event.logicalKey == LogicalKeyboardKey.enter ||
+      event.logicalKey == LogicalKeyboardKey.numpadEnter;
+  if (!isEnterKey) return KeyEventResult.ignored;
+  if (event is KeyUpEvent) return KeyEventResult.ignored;
+  if (event is KeyRepeatEvent) return KeyEventResult.handled;
+  if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+  if (HardwareKeyboard.instance.isShiftPressed) {
+    final value = controller.value;
+    final selection = value.selection.isValid
+        ? value.selection
+        : TextSelection.collapsed(offset: value.text.length);
+    final start = selection.start;
+    final end = selection.end;
+    final text = value.text.replaceRange(start, end, '\n');
+    controller.value = value.copyWith(
+      text: text,
+      selection: TextSelection.collapsed(offset: start + 1),
+      composing: TextRange.empty,
+    );
+  } else {
+    onSubmit();
+  }
+  return KeyEventResult.handled;
+}
+
 OverlayEntry? _activeToast;
 Timer? _activeToastTimer;
 Future<void> Function(String message)? _notifyUnseenError;
@@ -6361,33 +6393,42 @@ class _MessageRowState extends State<_MessageRow> {
           ),
           const SizedBox(height: 8),
         ],
-        TextField(
-          key: ValueKey('edit-input-${widget.message.id}'),
-          controller: _editController,
-          inputFormatters: [SmartTextInputFormatter()],
-          autofocus: true,
-          minLines: 1,
-          maxLines: 6,
-          textCapitalization: TextCapitalization.sentences,
-          textInputAction: TextInputAction.send,
-          style: const TextStyle(color: _text, fontSize: 14, height: 1.4),
-          decoration: const InputDecoration(
-            border: InputBorder.none,
-            enabledBorder: InputBorder.none,
-            focusedBorder: InputBorder.none,
-            isDense: true,
-            contentPadding: EdgeInsets.zero,
+        Focus(
+          onKeyEvent: (_, event) =>
+              _handleEnterSubmission(event, _editController, () {
+                if (_editController.text.trim().isNotEmpty ||
+                    _editAttachments.isNotEmpty) {
+                  _sendEditedMessage();
+                }
+              }),
+          child: TextField(
+            key: ValueKey('edit-input-${widget.message.id}'),
+            controller: _editController,
+            inputFormatters: [SmartTextInputFormatter()],
+            autofocus: true,
+            minLines: 1,
+            maxLines: 6,
+            textCapitalization: TextCapitalization.sentences,
+            textInputAction: TextInputAction.send,
+            style: const TextStyle(color: _text, fontSize: 14, height: 1.4),
+            decoration: const InputDecoration(
+              border: InputBorder.none,
+              enabledBorder: InputBorder.none,
+              focusedBorder: InputBorder.none,
+              isDense: true,
+              contentPadding: EdgeInsets.zero,
+            ),
+            onChanged: (_) {
+              setState(() {});
+              widget.onProactiveModeChanged(!_ventMode);
+            },
+            onSubmitted: (_) {
+              if (_editController.text.trim().isNotEmpty ||
+                  _editAttachments.isNotEmpty) {
+                _sendEditedMessage();
+              }
+            },
           ),
-          onChanged: (_) {
-            setState(() {});
-            widget.onProactiveModeChanged(!_ventMode);
-          },
-          onSubmitted: (_) {
-            if (_editController.text.trim().isNotEmpty ||
-                _editAttachments.isNotEmpty) {
-              _sendEditedMessage();
-            }
-          },
         ),
         const SizedBox(height: 8),
         Row(
@@ -8654,11 +8695,13 @@ class _ComposerState extends State<_Composer> {
                           ],
                           Focus(
                             onKeyEvent: (_, event) {
-                              if (event is KeyDownEvent &&
-                                  event.logicalKey ==
-                                      LogicalKeyboardKey.enter) {
-                                _submitMessage();
-                                return KeyEventResult.handled;
+                              final enterResult = _handleEnterSubmission(
+                                event,
+                                widget.controller,
+                                _submitMessage,
+                              );
+                              if (enterResult != KeyEventResult.ignored) {
+                                return enterResult;
                               }
                               if (event is KeyDownEvent &&
                                   event.logicalKey == LogicalKeyboardKey.keyV &&

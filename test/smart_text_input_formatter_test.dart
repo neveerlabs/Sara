@@ -5,13 +5,31 @@ import 'package:sara_desktop/smart_text_input_formatter.dart';
 void main() {
   const formatter = SmartTextInputFormatter();
 
-  test(
-      'typing an opening bracket inserts its closer and keeps the caret inside',
-      () {
-    final result = _type(formatter, _value('hello', 5), '(');
+  test('opening brackets next to letters do not insert a closer', () {
+    final beforeLetter = _type(formatter, _value('makanya', 0), '(');
+    final afterLetter = _type(formatter, _value('hello', 5), '(');
+    final contraction = _type(formatter, _value('dont', 3), "'");
+    final unicodeLetter = _type(formatter, _value('café', 4), '(');
 
-    expect(result.text, 'hello()');
-    expect(result.selection, const TextSelection.collapsed(offset: 6));
+    expect(beforeLetter.text, '(makanya');
+    expect(afterLetter.text, 'hello(');
+    expect(contraction.text, "don't");
+    expect(unicodeLetter.text, 'café(');
+  });
+
+  test('opening brackets still pair when separated from letters', () {
+    final result = _type(formatter, _value('hello ', 6), '(');
+
+    expect(result.text, 'hello ()');
+    expect(result.selection, const TextSelection.collapsed(offset: 7));
+  });
+
+  test('markdown delimiters next to letters do not insert a closer', () {
+    final beforeLetter = _type(formatter, _value('word', 0), '*');
+    final afterLetter = _type(formatter, _value('word', 4), '*');
+
+    expect(beforeLetter.text, '*word');
+    expect(afterLetter.text, 'word*');
   });
 
   test('markdown delimiters expand from italic to bold and fence pairs', () {
