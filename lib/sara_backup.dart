@@ -16,14 +16,13 @@ class BackupRestoreResult {
 
 class SaraBackupService {
   static const _format = 'sara-desktop-backup';
-  static const _version = 2;
-  static const _previousVersion = 1;
+  static const _version = 5;
+  static const _supportedVersions = {1, 2, 3, 4, _version};
   static const _uuid = Uuid();
 
-  SaraBackupService({
-    Future<Directory> Function()? supportDirectoryProvider,
-  }) : _supportDirectoryProvider =
-            supportDirectoryProvider ?? getApplicationSupportDirectory;
+  SaraBackupService({Future<Directory> Function()? supportDirectoryProvider})
+    : _supportDirectoryProvider =
+          supportDirectoryProvider ?? getApplicationSupportDirectory;
 
   final Future<Directory> Function() _supportDirectoryProvider;
 
@@ -78,7 +77,7 @@ class SaraBackupService {
     final decoded = jsonDecode(utf8.decode(backupBytes));
     if (decoded is! Map ||
         decoded['format'] != _format ||
-        !{_previousVersion, _version}.contains(decoded['version']) ||
+        !_supportedVersions.contains(decoded['version']) ||
         decoded['database'] is! Map ||
         decoded['attachment_files'] is! Map) {
       throw const FormatException('This is not a supported Sara backup file.');
@@ -125,8 +124,8 @@ class SaraBackupService {
         final extension = value['extension']! as String;
         final safeExtension =
             RegExp(r'^\.[A-Za-z0-9]{1,10}$').hasMatch(extension)
-                ? extension
-                : '.bin';
+            ? extension
+            : '.bin';
         decodedFiles[entry.key as String] = (
           safeExtension,
           base64Decode(value['data']! as String),
@@ -135,10 +134,9 @@ class SaraBackupService {
 
       await Directory(clipboardDirectory).create(recursive: true);
       for (final entry in decodedFiles.entries) {
-        final file = File(path.join(
-          clipboardDirectory,
-          '${_uuid.v4()}${entry.value.$1}',
-        ));
+        final file = File(
+          path.join(clipboardDirectory, '${_uuid.v4()}${entry.value.$1}'),
+        );
         createdFiles.add(file);
         await file.writeAsBytes(entry.value.$2, flush: true);
         restoredPaths[entry.key] = file.path;
@@ -184,8 +182,10 @@ class SaraBackupService {
 
   Future<String> _clipboardDirectoryPath() async {
     final supportDirectory = await _supportDirectoryProvider();
-    return path.normalize(path.absolute(
-      path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
-    ));
+    return path.normalize(
+      path.absolute(
+        path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
+      ),
+    );
   }
 }

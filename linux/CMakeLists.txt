@@ -75,7 +75,24 @@ set_target_properties(${BINARY_NAME}
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
+set(USE_SYSTEM_ONNXRUNTIME OFF CACHE BOOL "Bundle ONNX Runtime with Sara" FORCE)
 include(flutter/generated_plugins.cmake)
+
+if(TARGET flutter_onnxruntime_plugin)
+  set_target_properties(flutter_onnxruntime_plugin PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "$ORIGIN"
+  )
+  add_custom_target(sara_onnxruntime_soname
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+      "${CMAKE_BINARY_DIR}/plugins/flutter_onnxruntime/libonnxruntime.so.1"
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+      libonnxruntime.so
+      "${CMAKE_BINARY_DIR}/plugins/flutter_onnxruntime/libonnxruntime.so.1"
+    DEPENDS flutter_onnxruntime_plugin
+  )
+  add_dependencies(${BINARY_NAME} sara_onnxruntime_soname)
+endif()
 
 
 # === Installation ===
@@ -108,6 +125,14 @@ foreach(bundled_library ${PLUGIN_BUNDLED_LIBRARIES})
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
 endforeach(bundled_library)
+
+if(TARGET flutter_onnxruntime_plugin)
+  install(FILES
+    "${CMAKE_BINARY_DIR}/plugins/flutter_onnxruntime/libonnxruntime.so"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    RENAME "libonnxruntime.so.1"
+    COMPONENT Runtime)
+endif()
 
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/linux/")

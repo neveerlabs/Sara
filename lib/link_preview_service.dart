@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:html/dom.dart' as dom;
 import 'package:html/parser.dart' as html;
 
 class LinkPreview {
@@ -10,20 +11,25 @@ class LinkPreview {
     required this.uri,
     required this.title,
     required this.description,
+    this.siteName,
     this.imageBytes,
+    this.faviconBytes,
     this.videoUri,
   });
 
   final Uri uri;
   final String title;
   final String? description;
+  final String? siteName;
   final Uint8List? imageBytes;
+  final Uint8List? faviconBytes;
   final Uri? videoUri;
 }
 
 class LinkPreviewService {
   static const _requestTimeout = Duration(seconds: 8);
   static const _maxHtmlBytes = 1024 * 1024;
+  static const _maxFaviconBytes = 512 * 1024;
   static const _maxImageBytes = 5 * 1024 * 1024;
 
   Future<LinkPreview?> load(Uri uri) async {
@@ -38,6 +44,7 @@ class LinkPreviewService {
           title: response.uri.host,
           description: null,
           imageBytes: response.bytes,
+          faviconBytes: response.bytes,
         );
       }
       if (!(response.contentType?.toLowerCase().contains('text/html') ??
@@ -46,6 +53,10 @@ class LinkPreviewService {
       }
 
       final document = html.parse(response.text);
+      final faviconBytes = await _loadFaviconFromDocument(
+        response.uri,
+        document,
+      );
       final pageTitle = _firstText([
         document
             .querySelector('meta[property="og:title"]')
@@ -54,6 +65,14 @@ class LinkPreviewService {
             .querySelector('meta[name="twitter:title"]')
             ?.attributes['content'],
         document.querySelector('title')?.text,
+      ]);
+      final siteName = _firstText([
+        document
+            .querySelector('meta[property="og:site_name"]')
+            ?.attributes['content'],
+        document
+            .querySelector('meta[name="application-name"]')
+            ?.attributes['content'],
       ]);
       final description = _firstText([
         document
@@ -105,8 +124,10 @@ class LinkPreviewService {
         }
       }
       if (pageTitle == null &&
+          siteName == null &&
           description == null &&
           imageBytes == null &&
+          faviconBytes == null &&
           videoUri == null) {
         return null;
       }
@@ -114,7 +135,9 @@ class LinkPreviewService {
         uri: response.uri,
         title: pageTitle ?? response.uri.host,
         description: description,
+        siteName: siteName,
         imageBytes: imageBytes,
+        faviconBytes: faviconBytes,
         videoUri: videoUri,
       );
     } on SocketException {
@@ -130,6 +153,81 @@ class LinkPreviewService {
     } on _PreviewFetchException {
       return null;
     }
+  }
+
+  Future<Uint8List?> loadFavicon(Uri pageUri) async {
+    try {
+      if (!_isValidPreviewUri(pageUri)) return null;
+      final response = await _fetch(pageUri, _maxHtmlBytes);
+      if (response == null) return null;
+      if (response.contentType?.toLowerCase().startsWith('image/') ?? false) {
+        return response.bytes;
+      }
+      if (!(response.contentType?.toLowerCase().contains('text/html') ??
+          false)) {
+        return null;
+      }
+      return await _loadFaviconFromDocument(
+        response.uri,
+        html.parse(response.text),
+      );
+    } on SocketException {
+      return null;
+    } on HttpException {
+      return null;
+    } on FormatException {
+      return null;
+    } on HandshakeException {
+      return null;
+    } on TimeoutException {
+      return null;
+    } on _PreviewFetchException {
+      return null;
+    }
+  }
+
+  Future<Uint8List?> _loadFaviconFromDocument(
+    Uri pageUri,
+    dom.Document document,
+  ) async {
+    final iconUrls = <String>[];
+    for (final link in document.querySelectorAll('link[rel][href]')) {
+      final relTokens = (link.attributes['rel'] ?? '').toLowerCase().split(
+        RegExp(r'\s+'),
+      );
+      if (relTokens.contains('icon') ||
+          relTokens.any((token) => token.startsWith('apple-touch-icon'))) {
+        final href = link.attributes['href'];
+        if (href != null && href.isNotEmpty) iconUrls.add(href);
+      }
+    }
+    iconUrls.add('/favicon.ico');
+
+    final visited = <String>{};
+    for (final iconUrl in iconUrls) {
+      try {
+        final iconUri = pageUri.resolve(iconUrl);
+        if (!visited.add(iconUri.toString())) continue;
+        final response = await _fetch(iconUri, _maxFaviconBytes);
+        if (response?.contentType?.toLowerCase().startsWith('image/') ??
+            false) {
+          return response!.bytes;
+        }
+      } on SocketException {
+        continue;
+      } on HttpException {
+        continue;
+      } on FormatException {
+        continue;
+      } on HandshakeException {
+        continue;
+      } on TimeoutException {
+        continue;
+      } on _PreviewFetchException {
+        continue;
+      }
+    }
+    return null;
   }
 
   Future<_FetchedResponse?> _fetch(Uri initialUri, int maxBytes) async {
@@ -187,14 +285,17 @@ class LinkPreviewService {
       return false;
     }
 
-    final normalizedHost =
-        uri.host.toLowerCase().replaceFirst(RegExp(r'\.$'), '');
+    final normalizedHost = uri.host.toLowerCase().replaceFirst(
+      RegExp(r'\.$'),
+      '',
+    );
     if (normalizedHost == 'localhost' ||
         normalizedHost.endsWith('.localhost')) {
       return false;
     }
-    final addresses =
-        await InternetAddress.lookup(normalizedHost).timeout(_requestTimeout);
+    final addresses = await InternetAddress.lookup(
+      normalizedHost,
+    ).timeout(_requestTimeout);
     return addresses.isNotEmpty && addresses.every(_isPublicAddress);
   }
 

@@ -63,9 +63,7 @@ class TerminalCommandHistoryEntry {
     required this.createdAtUtc,
   });
 
-  factory TerminalCommandHistoryEntry.fromResult(
-    TerminalCommandResult result,
-  ) {
+  factory TerminalCommandHistoryEntry.fromResult(TerminalCommandResult result) {
     return TerminalCommandHistoryEntry(
       taskContext: result.request.taskContext,
       responseMessageId: result.request.responseMessageId,
@@ -85,7 +83,7 @@ class TerminalCommandHistoryEntry {
 
   factory TerminalCommandHistoryEntry.fromMap(Map<String, Object?> map) {
     return TerminalCommandHistoryEntry(
-      id: map['id']! as int,
+      id: map['id'] as int?,
       responseMessageId: map['response_message_id'] as String?,
       taskContext: map['task_context']! as String,
       command: map['command']! as String,
@@ -118,54 +116,35 @@ class TerminalCommandHistoryEntry {
   final int createdAtUtc;
 
   Map<String, Object?> toMap() => {
-        if (id != null) 'id': id,
-        'response_message_id': responseMessageId,
-        'task_context': taskContext,
-        'command': command,
-        'working_directory': workingDirectory,
-        'exit_code': exitCode,
-        'stdout': stdout,
-        'stderr': stderr,
-        'error': error,
-        'timed_out': timedOut ? 1 : 0,
-        'cancelled': cancelled ? 1 : 0,
-        'skipped': skipped ? 1 : 0,
-        'output_truncated': outputTruncated ? 1 : 0,
-        'created_at_utc': createdAtUtc,
-      };
-
-  Map<String, Object?> toSearchResult() => {
-        'task': taskContext,
-        'command': command,
-        'workingDirectory': workingDirectory,
-        'exitCode': exitCode,
-        if (error != null) 'error': error,
-        'stdout': _boundedText(stdout),
-        'stderr': _boundedText(stderr),
-        'timedOut': timedOut,
-        'cancelled': cancelled,
-        'skipped': skipped,
-        'createdAtUtc': createdAtUtc,
-      };
-
-  static String _boundedText(String text) =>
-      text.length <= 1200 ? text : '${text.substring(0, 1200)}…';
+    if (id != null) 'id': id,
+    'response_message_id': responseMessageId,
+    'task_context': taskContext,
+    'command': command,
+    'working_directory': workingDirectory,
+    'exit_code': exitCode,
+    'stdout': stdout,
+    'stderr': stderr,
+    'error': error,
+    'timed_out': timedOut ? 1 : 0,
+    'cancelled': cancelled ? 1 : 0,
+    'skipped': skipped ? 1 : 0,
+    'output_truncated': outputTruncated ? 1 : 0,
+    'created_at_utc': createdAtUtc,
+  };
 }
 
-typedef TerminalCommandApprovalHandler = Future<TerminalApprovalDecision>
-    Function(TerminalCommandRequest request);
-typedef TerminalCommandResultHandler = FutureOr<void> Function(
-  TerminalCommandResult result,
-);
-typedef TerminalCommandActivityHandler = void Function(
-  TerminalCommandRequest request, {
-  required bool running,
-  required bool automaticallyAllowed,
-});
-typedef TerminalCommandOutputHandler = void Function(
-  String stdout,
-  String stderr,
-);
+typedef TerminalCommandApprovalHandler =
+    Future<TerminalApprovalDecision> Function(TerminalCommandRequest request);
+typedef TerminalCommandResultHandler =
+    FutureOr<void> Function(TerminalCommandResult result);
+typedef TerminalCommandActivityHandler =
+    void Function(
+      TerminalCommandRequest request, {
+      required bool running,
+      required bool automaticallyAllowed,
+    });
+typedef TerminalCommandOutputHandler =
+    void Function(String stdout, String stderr);
 
 class TerminalCommandRunner {
   TerminalCommandRunner({
@@ -188,11 +167,10 @@ class TerminalCommandRunner {
 
     Process process;
     try {
-      process = await Process.start(
-        '/bin/bash',
-        ['-lc', request.command],
-        workingDirectory: request.workingDirectory,
-      );
+      process = await Process.start('/bin/bash', [
+        '-lc',
+        request.command,
+      ], workingDirectory: request.workingDirectory);
     } on ProcessException catch (error) {
       return TerminalCommandResult(
         request: request,
@@ -248,9 +226,7 @@ class TerminalCommandRunner {
       timedOut = true;
       process.kill(ProcessSignal.sigterm);
       try {
-        exitCode = await process.exitCode.timeout(
-          const Duration(seconds: 2),
-        );
+        exitCode = await process.exitCode.timeout(const Duration(seconds: 2));
       } on TimeoutException {
         process.kill(ProcessSignal.sigkill);
       }

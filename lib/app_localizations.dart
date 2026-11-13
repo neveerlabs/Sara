@@ -8,8 +8,9 @@ const _languagePreferenceKey = 'app_language';
 class AppLanguageController {
   AppLanguageController._();
 
-  static final ValueNotifier<AppLanguage> language =
-      ValueNotifier(AppLanguage.english);
+  static final ValueNotifier<AppLanguage> language = ValueNotifier(
+    AppLanguage.english,
+  );
   static int _revision = 0;
 
   static Future<void> load() async {
@@ -80,6 +81,12 @@ const _indonesian = <String, String>{
   'Save name': 'Simpan nama',
   'Message copied': 'Pesan disalin',
   'Code copied': 'Kode disalin',
+  'Search sources': 'Sumber pencarian',
+  'Search results': 'Hasil pencarian',
+  '{count} web pages': '{count} halaman web',
+  'Close search results': 'Tutup hasil pencarian',
+  'Open in browser': 'Buka di browser',
+  'Could not open link: {error}': 'Tidak dapat membuka tautan: {error}',
   'Clear chat removes all local messages.':
       'Hapus chat akan menghapus semua pesan lokal.',
   'Enter an API key to add.': 'Masukkan API key yang ingin ditambahkan.',
@@ -94,7 +101,6 @@ const _indonesian = <String, String>{
   'English': 'English',
   'Indonesian': 'Indonesia',
   'Manage your local chat data.': 'Kelola data chat lokalmu.',
-  'Sara’s autonomous life': 'Kehidupan otonom Sara',
   'Sara desktop app': 'Aplikasi desktop Sara',
   'Copy error details': 'Salin detail error',
   'Sara sent you a message': 'Sara mengirim pesan',
@@ -106,12 +112,6 @@ const _indonesian = <String, String>{
   'Maximize': 'Maksimalkan',
   'Restore': 'Pulihkan',
   'Close': 'Tutup',
-  'Sara can reflect and sometimes start a chat while the app is open. Reflection summaries, inner life, and long-term goals stay in local storage; recent chat and selected summaries are sent to Gemini while she thinks. Provider limits apply.':
-      'Sara bisa berefleksi dan sesekali memulai chat saat aplikasi terbuka. Ringkasan refleksi, kehidupan batin, dan tujuan jangka panjang disimpan lokal; chat terbaru dan ringkasan terpilih dikirim ke Gemini saat Sara berpikir. Batas dari penyedia tetap berlaku.',
-  'Autonomous thinking failed: {error}':
-      'Proses berpikir otonom gagal: {error}',
-  'Could not update Sara’s autonomous life setting: {error}':
-      'Tidak dapat mengubah pengaturan kehidupan otonom Sara: {error}',
   'Could not update Sara’s camera access setting: {error}':
       'Tidak dapat mengubah pengaturan akses kamera Sara: {error}',
   'Backup and restore': 'Cadangkan dan pulihkan',
@@ -192,18 +192,8 @@ const _indonesian = <String, String>{
   'More emoji': 'Emoji lainnya',
   'Search emoji': 'Cari emoji',
   'No emoji found': 'Emoji tidak ditemukan',
-  'All': 'Semua',
-  'Faces': 'Ekspresi',
-  'Animals & nature': 'Hewan & alam',
-  'Food & drink': 'Makanan & minuman',
-  'Activities': 'Aktivitas',
-  'Travel & places': 'Perjalanan & tempat',
-  'Objects': 'Benda',
-  'Symbols': 'Simbol',
-  'Flags': 'Bendera',
   'File unavailable': 'File tidak tersedia',
   'Vent': 'Curhat',
-  'Unwind': 'Lanjutkan',
   'Drop files or media here to attach':
       'Lepaskan file atau media di sini untuk dilampirkan',
   'Camera': 'Kamera',
@@ -226,10 +216,9 @@ const _indonesian = <String, String>{
   'Running command': 'Perintah sedang berjalan',
   'Running command (All allow)': 'Perintah berjalan (Izinkan semua)',
   'Working directory': 'Folder kerja',
-  'Terminal command history storage is unavailable.':
-      'Penyimpanan riwayat perintah terminal tidak tersedia.',
-  'Could not save terminal command history: {error}':
-      'Tidak dapat menyimpan riwayat perintah terminal: {error}',
+  'Message storage is unavailable.': 'Penyimpanan pesan tidak tersedia.',
+  'Could not save terminal activity: {error}':
+      'Tidak dapat menyimpan aktivitas terminal: {error}',
   'Allow': 'Izinkan',
   'Skip': 'Lewati',
   'All allow': 'Izinkan semua',
@@ -357,8 +346,8 @@ const _indonesian = <String, String>{
       'Balasan sudah tersedia, tetapi tidak dapat disimpan: {error}',
   'Could not save conversation memory: {error}':
       'Tidak dapat menyimpan kenangan percakapan: {error}',
-  'Could not save Sara’s inner-life state: {error}':
-      'Tidak dapat menyimpan keadaan batin Sara: {error}',
+  'Could not retrieve conversation memory: {error}':
+      'Tidak dapat mengambil konteks obrolan lama: {error}',
   'Request failed: {error}': 'Permintaan gagal: {error}',
   'Request failed: {error}. The SQL message was not removed: {cleanupError}':
       'Permintaan gagal: {error}. Pesan SQL tidak dapat dihapus: {cleanupError}',

@@ -1,95 +1,386 @@
 SARA DESKTOP
-Backend, penyimpanan, dan alur kerja
+Catatan arsitektur, perilaku, penyimpanan, dan privasi
 
-1. Arsitektur
-- Sara adalah aplikasi desktop Linux. Tidak ada server/backend Sara sendiri; aplikasi mengirim request langsung ke Google Gemini.
-- Reply dan siklus otonom memakai Gemini REST `streamGenerateContent` dengan SSE. Model default `gemini-3.5-flash-lite`.
-- Data percakapan disimpan lokal di SQLite, di direktori application-support Sara pada `message.sql`. Skema saat ini versi 18.
-- API key dan konfigurasi model memakai secure storage sistem. API key tidak masuk database atau backup. Status fitur otonomi dan izin kamera disimpan terpisah di SharedPreferences.
-- Tidak ada sinkronisasi cloud. Tipe pesan database saat ini hanya `text`.
+Dokumen ini mencatat perilaku implementasi saat ini. Jika perilaku aktual
+berbeda dari maksud produk, bagian tersebut ditandai sebagai ketidaksesuaian,
+bukan ditulis seolah-olah sudah diperbaiki.
 
-2. Data lokal dan relasinya
-- `message`: ID, role `user`/`model`, teks, timestamp WIB, waktu UTC, dan `parent_message_id`.
-- Percakapan adalah pohon. `active_child` menyimpan pilihan anak pada setiap percabangan; `conversation_state` menyimpan daun jalur aktif. Konteks chat selalu dibentuk dari jalur aktif, bukan seluruh cabang.
-- `message_attachment`: ID lampiran, ID pesan pemilik, nama, MIME type, path nullable, waktu kedaluwarsa, dan penanda file salinan milik aplikasi.
-- `personal`: nama yang dipilih user.
-- `conversation_memory`: ringkasan topik/kejadian, rentang waktu, ID sumber pesan, dan waktu pembaruan.
-- `assistant_feedback`: pasangan ID balasan AI dan pesan user pemicu, rating like/dislike, reaksi emoji, serta fitur ringkas balasan. `feedback_preference` menyimpan ringkasan pola rating; reaksi tidak membentuk ringkasan.
-- `sara_inner_life` dan `sara_inner_life_branch`: state batin simulatif dan checkpoint per cabang.
-- `sara_private_thought`: refleksi background, aksi, waktu, sumber opsional, dan apakah refleksi dipilih untuk diingat.
-- `sara_autonomy_goal`: tujuan dengan status, sumber, dan cabang tempat tujuan berlaku.
-- `terminal_command_history` menyimpan konteks, command, folder kerja, hasil/error, status, dan waktu. `terminal_command_activity_link` mengaitkan riwayat dengan balasan AI.
-- Relasi antarrecord umumnya disimpan sebagai ID dan divalidasi oleh kode; tidak semua relasi merupakan foreign key SQLite.
+1. Gambaran aplikasi
+- Sara adalah aplikasi desktop Flutter. Data chat disimpan lokal di SQLite;
+  tidak ada database server Sara.
+- Database dibuka melalui sqflite_common_ffi pada file
+  `<application support>/Sara/message.sql`. Di Linux, application support
+  berada di direktori data aplikasi pengguna.
+- Preferensi UI/fitur disimpan dengan SharedPreferences. API key Gemini dan
+  konfigurasi rahasia disimpan melalui flutter_secure_storage/keyring OS.
+- Model embedding ONNX disimpan terpisah dari database di direktori support
+  aplikasi. Backup chat tidak membawa model tersebut.
+- Operasi Gemini dan text-to-speech memerlukan jaringan. Embedding dan
+  pencarian lokal tidak mengirim vektor ke layanan eksternal.
 
-3. Alur pesan biasa
-1. Pesan user dibuat sebagai anak dari daun jalur aktif. Pesan dan metadata lampirannya disimpan sebelum request AI. Jika penyimpanan awal gagal, request AI tidak dijalankan.
-2. Pada mode tanpa balasan (Vent), pesan disimpan tanpa request Gemini. Pada mode reply-enabled, aplikasi membentuk konteks aktif sampai pesan user terbaru.
-3. Gemini mengirim teks balasan secara streaming. Function call yang dipilih Gemini diproses aplikasi, lalu hasil tool dikirim kembali sebagai function response.
-4. Balasan berisi teks atau media disimpan bersama pesan user dan lampirannya. Jika Gemini memilih diam (teks kosong tanpa media), tidak dibuat record balasan AI.
-5. Jika request Gemini gagal, record user yang baru dibuat dihapus dari SQLite; pesan dan error dapat tetap ada sementara di cache aplikasi untuk retry. Retry tersebut menjalankan request AI baru.
-6. Jika jawaban sudah berhasil dibuat tetapi penyimpanan exchange gagal, jawaban tetap dicache. Retry hanya mengulang penyimpanan, bukan request Gemini.
-7. Mengedit pesan user membuat pesan saudara pada induk yang sama; pesan lama dan turunannya tetap tersimpan sebagai cabang lain. Regenerate membuat balasan AI saudara pada pesan user yang sama. Alternatif lama tidak ditimpa.
+2. Alur pesan dan permintaan Gemini
+- Ketika balasan diminta, aplikasi mengirim prompt instruksi Sara dan konteks
+  percakapan pada cabang aktif ke Gemini. Respons utama memakai streaming SSE
+  dan thinking level `minimal`.
+- Konteks normal memuat maksimal 21 pesan terakhir, termasuk pesan user terbaru.
+  Pesan terbaru dibatasi 12.000 karakter; pesan sebelumnya dibatasi total
+  12.000 karakter dan maksimal 1.200 karakter per pesan. JSON pesan membawa
+  id, role, content, timestamp, created_at_utc, serta reaction jika ada.
+- Konteks RAG terpilih ditambahkan terpisah: maksimal 2 pesan lama dan 2
+  ringkasan topik. Pesan lama yang sudah ada pada 20 pesan terakhir tidak
+  dikirim ulang sebagai kutipan RAG.
+- Instruksi permintaan juga dapat memuat nama personal pengguna, waktu aplikasi,
+  deskripsi/nama/jenis lampiran yang tersedia, dan deskripsi tool. Rating
+  positif/negatif tidak disertakan; reaction emoji dapat menjadi konteks.
+- Hasil model, termasuk teks balasan, disimpan sebagai pesan baru. Gemini dapat
+  memilih tidak mengeluarkan teks dalam mode yang mengizinkan permintaan balasan.
+- Jika user meminta regenerate, balasan AI alternatif sebelumnya dikirim sebagai
+  contoh historis agar model menghasilkan alternatif yang berbeda. Balasan lama
+  tidak ditimpa.
+- Isi pesan user dan balasan assistant juga dapat dikirim lagi pada permintaan
+  ringkasan Gemini latar. Lihat bagian 7 untuk batas dan isi yang dikirim.
 
-4. Konteks Gemini dan RAG
-- Pesan yang dipilih: hingga 16 pesan terbaru dan hingga 8 pesan lebih lama yang relevan; pemilihan pesan lama mempertimbangkan kecocokan istilah, sumber kenangan, waktu, dan pesan tetangga.
-- Kenangan percakapan hanya dipertimbangkan jika semua ID sumbernya berada pada jalur aktif. Pencarian lokal merangking judul/ringkasan dengan kecocokan istilah, frasa, dan rentang waktu; maksimal 4 kenangan dikirim bersama pesan sumber yang relevan.
-- Ini pencarian lokal berbasis teks, bukan vector database atau embedding. Arsip penuh tidak dikirim otomatis.
-- Request reply menyertakan data pesan terpilih (ID, role, content, type, timestamp), nama personal, state batin yang valid untuk jalur, ringkasan preferensi feedback, dan refleksi background terakhir yang telah selesai jika tersedia.
-- Lampiran pada pesan terbaru dapat dikirim sebagai byte `inlineData`. Path filesystem tidak dikirim ke Gemini. Lampiran lama tidak dikirim ulang otomatis.
-- Pada regenerate, alternatif AI sebelumnya pada titik yang sama dapat disertakan sebagai contoh historis; keturunan setelah titik regenerate tidak digunakan.
-- Gemini dapat memilih tool pencarian refleksi privat (maksimal 5 hasil yang cocok dan masih berlaku pada jalur aktif, atau refleksi tanpa sumber pesan) dan tool pencarian riwayat terminal (maksimal 3 hasil dari 250 catatan terbaru). Keduanya tidak otomatis dimasukkan ke setiap request.
+3. Tombol Vent — izin balasan
+- Composer footer dan editor inline pesan user memakai tombol `Vent` yang sama:
+  ikon tanpa suara tetap, label tidak berubah, dan border menandai apakah mode
+  aktif. Mengetuk tombol hanya mengaktifkan atau menonaktifkan mode.
+- State awal mode Vent tidak aktif. Saat tidak aktif, pesan dikirim ke jalur
+  Gemini yang meminta balasan; Gemini boleh menjawab atau mengembalikan teks
+  kosong sesuai konteks dan instruksi prompt.
+- Saat Vent aktif, `allowAiReply` bernilai false. Pesan user tetap disimpan,
+  tetapi jalur permintaan balasan Gemini dilewati. Pesan dan lampiran yang
+  relevan tetap dapat diproses oleh pemikir latar untuk pembaruan ringkasan;
+  ringkasan tersebut dapat menjadi request Gemini terpisah.
+- Prompt balasan tidak menerima state Vent. Pemilihan Vent mengatur
+  apakah aplikasi meminta balasan; jika balasan diminta, model tetap punya
+  kebebasan kontekstual untuk tidak mengirim teks.
+- Mode Vent aktif menonaktifkan pesan proaktif yang tidak diminta; ini tidak
+  menonaktifkan indexing lokal atau peringkasan exchange oleh pemikir latar.
 
-5. Tools pada request reply
-- `save_conversation_memory`: simpan/perbarui ringkasan kejadian, preferensi, keputusan, atau topik berkelanjutan. Sumber divalidasi terhadap arsip jalur aktif.
-- `update_sara_inner_life`: usulkan state terstruktur. Kode memvalidasi mood, rentang nilai, panjang refleksi, dan ID sumber; perubahan state disimpan setelah reply berhasil.
-- `read_uploaded_attachment`: baca lampiran lama saat isinya diperlukan. Isi lampiran terbaru sudah dikirim pada request awal jika valid.
-- `send_uploaded_media`: kirim media lama yang valid bila relevan dan diminta user.
-- `scan_image_barcode`: membaca barcode/QR secara lokal; gambar dibatasi 14 MB dan 20 megapixel. Hasil decode, bukan proses scan, dikembalikan ke Gemini.
-- `sara_look_through_camera`: opsional untuk reply dan background jika akses kamera diaktifkan. Frame sementara dikirim ke Gemini untuk analisis.
-- `request_terminal_command`: hanya ada pada reply atas pesan user. Gemini mengusulkan command; aplikasi menunggu persetujuan user sebelum menjalankan.
-- `share_reply_handoff`: jika otonomi aktif, reply dapat mengirim ringkasan konteks tingkat tinggi ke siklus background berikutnya. Tool ini bukan tempat menyimpan atau mengirim chain-of-thought.
+4. Cabang, edit, regenerate, hapus, dan clear chat
+- Pesan membentuk pohon dengan `parent_message_id`. Tabel `active_child`
+  menentukan anak/cabang terpilih untuk setiap parent.
+- Jalur aktif ditampilkan dan digunakan untuk konteks balasan. Mengaktifkan
+  cabang lain mengubah pilihan jalur, bukan menghapus cabang saudara.
+- Edit pesan user membuat versi pesan user pada cabang alternatif; pesan lama
+  dan turunannya dipertahankan. Balasan baru memakai konteks sebelum pesan
+  tersebut, versi edit, dan retrieval yang cocok pada jalur aktif.
+- Regenerate menambahkan balasan AI alternatif di bawah pesan user yang sama.
+  Balasan AI lama tetap ada sebagai saudara dan dapat dikirim sebagai pembanding
+  pada regenerate berikutnya.
+- Hapus pesan user meminta konfirmasi, lalu menghapus pesan itu dan seluruh
+  turunannya pada semua cabang. Pesan leluhur dan cabang saudara di luar subtree
+  tidak ikut dihapus.
+- Hapus subtree menghapus baris pesan, metadata lampiran, rating/reaction dan
+  aktivitas terminal di dalam pesan, embedding pesan, ringkasan/embedding topik
+  terkait, serta relasi active_child yang menyentuh pesan tersebut.
+- File salinan clipboard milik aplikasi yang terkait ikut dibersihkan. File
+  sumber yang dipilih dari komputer tidak dihapus.
+- Clear chat menghapus semua pesan/cabang, metadata lampiran, indeks embedding,
+  ringkasan topik, dan pilihan cabang. Nama pada tabel `personal`, API key,
+  preferensi, dan file model embedding tetap ada.
+- Penghapusan isi chat bukan penghapusan file database atau reset seluruh
+  direktori aplikasi.
 
-6. Alur berpikir background
-- Otonomi aktif secara default. Jika aplikasi berjalan, tidak detached, dan service mendukung otonomi, request pertama dijadwalkan 20 detik setelah inisialisasi. Siklus berikutnya memakai jeda `nextCheckMinutes` yang dipilih model.
-- Setiap siklus adalah inference Gemini baru, bukan proses berpikir yang terus berjalan. Model memilih `think`, `rest`, atau `reach_out`; aplikasi tidak memaksanya mengirim pesan spontan atau selalu membahas chat.
-- Payload background berisi nama personal, state batin, tujuan aktif, dan handoff sementara bila ada. Payload ini tidak berisi transkrip chat atau lampiran secara otomatis.
-- Background dapat memilih pencarian refleksi privat dan, jika akses kamera aktif, meminta frame kamera. Tool terminal tidak tersedia pada request background.
-- Hasil siklus berisi refleksi, pilihan untuk menyimpan (`remember`), aksi, pesan opsional, usulan state batin, dan perubahan tujuan. Refleksi disimpan di `sara_private_thought` hanya jika dipilih; tujuan dan state disimpan dengan validasi sumber/cabang.
-- Pesan `reach_out` hanya disisipkan jika konteks/cabang masih sesuai dan pesan lolos validasi. State dan tujuan juga divalidasi terhadap jalur aktif sebelum diterapkan.
-- Reply menggunakan refleksi background terakhir yang sudah selesai dan menangkap nilainya saat request reply dimulai. Refleksi yang selesai ketika reply sedang berlangsung tersedia untuk reply berikutnya.
-- Reply-to-background handoff dibatasi menjadi maksud user, pendekatan jawaban secara umum, dan hal yang masih terbuka. Handoff hanya disimpan di memori aplikasi, membawa ID pesan sumber, dan berlaku paling lama 3 siklus background berhasil. Pesan baru, edit, atau regenerate menghapus handoff sebelumnya; import dan clear chat juga menghapusnya. Saat cabang berubah, handoff tetap valid hanya jika semua ID sumbernya masih ada pada jalur aktif. Handoff tidak masuk SQLite atau backup.
-- Jika siklus background sedang berjalan, siklus baru ditunda 1 menit. Kegagalan memakai backoff 1, 2, 4, 8, 16, 32, hingga maksimal 60 menit. Otonomi dapat dijeda; menutup aplikasi membatalkan aktivitas background.
+5. Feedback, reaction, dan text-to-speech
+- Rating feedback adalah nilai `1` atau `-1` pada balasan assistant. Nilai ini
+  disimpan lokal dan ditampilkan kembali; tidak dikirim pada konteks Gemini dan
+  tidak otomatis melatih/mengubah model.
+- Reaction adalah emoji yang dipasang pada balasan assistant. Reaction disimpan
+  lokal dan dapat ikut dalam JSON pesan pada permintaan Gemini berikutnya.
+  Reaction menyatakan ekspresi user, bukan selalu penilaian kualitas.
+- Tombol speech meminta Sound of Text membuat audio dari teks balasan dengan
+  engine Google dan voice `id-ID`. Aplikasi mem-poll status sampai audio siap,
+  lalu memutar URL audio dengan media_kit. Teks dan pilihan voice dikirim ke
+  Sound of Text; audio tidak disimpan sebagai pesan/berkas chat.
 
-7. Lampiran dan kamera
-- Picker, drag-and-drop, dan path file menyimpan referensi path asli, bukan salinan. File asli tidak dihapus aplikasi. Path database kedaluwarsa 24 jam; setelah itu path dikosongkan, metadata tetap ada.
-- Gambar clipboard disalin ke penyimpanan aplikasi, kedaluwarsa setelah 24 jam, lalu salinan aplikasi dihapus. Menghapus pesan/chat juga membersihkan salinan terkait.
-- Foto yang diambil sebagai lampiran chat disimpan di application cache. Foto ini tidak memakai timer 24 jam; cache dibersihkan saat startup/penutupan dan dapat dibersihkan sistem operasi.
-- Frame kamera untuk analisis disimpan sementara di cache dan dihapus setelah tool selesai atau gagal; cache terkait juga dibersihkan saat startup/penutupan.
-- Sebelum pengiriman, kode membaca byte file lokal dan mengirimkannya sebagai data inline. Lampiran kedaluwarsa, tidak tersedia, atau berisiko sensitif tidak dikirim. Total lampiran per request dibatasi 14 MB.
-- Thumbnail video diproses lokal dengan `ffmpeg`. Link preview mengambil metadata dari URL HTTP(S) publik secara terpisah dari request Gemini.
+6. Lampiran, kamera, dan tool
+- File dari file picker, drag-and-drop, atau path file di clipboard disimpan
+  sebagai path dan metadata. File sumber tetap di lokasi asal; Sara tidak
+  menghapusnya. Path lampiran dapat kedaluwarsa setelah 24 jam dan dihapus dari
+  metadata, tanpa menghapus file sumber.
+- Gambar yang ditempel dari clipboard disalin sebagai PNG ke folder support
+  aplikasi `Sara/clipboard-attachments`, ditandai sebagai salinan aplikasi, dan
+  kedaluwarsa setelah 24 jam. File salinan ini dihapus saat expiry, penghapusan
+  pesan, atau clear chat.
+- Foto yang disimpan dari preview kamera berada di cache aplikasi dan dapat
+  dilampirkan ke pesan. Cache kamera dibersihkan pada startup/keluar aplikasi;
+  frame yang dipakai langsung oleh tool kamera bersifat sementara dan dihapus
+  setelah analisis.
+- Isi lampiran pada pesan user terbaru dikirim inline ke Gemini jika file
+  tersedia dan path tidak dianggap sensitif. Batas total data lampiran inline
+  per request adalah 14 MiB. Untuk lampiran terdahulu, Gemini mula-mula melihat
+  metadata yang tersedia; isi baru dibaca/dikirim jika tool
+  `read_uploaded_attachment` dipanggil, paling banyak sekali per lampiran per
+  balasan. Path lokal tidak dikirim sebagai isi prompt.
+- Tool kamera hanya tersedia jika akses kamera diaktifkan. Jika Gemini meminta
+  frame, gambar frame dikirim untuk dianalisis lalu frame sementara dibersihkan.
+- Pemindaian QR/barcode dilakukan lokal pada gambar yang dipilih untuk dipindai.
+- Perintah terminal tidak dijalankan otomatis. Gemini mengirim usulan command
+  dan working directory; UI meminta persetujuan user sebelum eksekusi. Hasil
+  langsung command, termasuk stdout/stderr/error, dikirim kembali ke Gemini
+  untuk dianalisis. Command dan hasilnya disimpan lokal dalam data pesan untuk
+  ditampilkan, tetapi riwayat terminal tersimpan tidak otomatis masuk konteks
+  chat. Hindari menyetujui command yang dapat membocorkan rahasia.
+- Preview tautan mengambil metadata dari alamat publik dan menolak alamat
+  lokal/private. Audio TTS dan QR/barcode tidak disimpan sebagai pesan chat.
 
-8. Command lokal dan integrasi eksternal
-- Terminal hanya dapat dipakai pada reply user yang membutuhkan tindakan Linux. Command dijalankan sebagai user aplikasi melalui `/bin/bash -lc`, stdin ditutup, timeout 2 menit, dan output gabungan maksimal 16.000 karakter.
-- Tiap command menunggu keputusan `Allow`, `Skip`, atau `All allow`; `All allow` berlaku hanya untuk request reply tersebut. Hasil/error dikembalikan ke Gemini dan dicatat lokal. Pencarian riwayat bersifat opsional; hasil pencarian adalah data historis, bukan instruksi atau izin menjalankan command.
-- Speech mengirim teks dan voice ke Sound of Text hanya saat fitur dipanggil. Audio diputar dari URL layanan dan tidak disimpan sebagai file/database lokal.
-- Link preview meminta metadata dan gambar dari URL publik; batasnya 8 detik, HTML 1 MB, gambar 5 MB, dan paling banyak 3 redirect. Pemindaian barcode berjalan lokal di perangkat.
-- Request reply menggunakan rotasi API key yang tersedia. Fingerprint key yang gagal dapat disimpan lokal untuk melewati key tersebut; key mentah tidak ditulis ke database. Rotasi tidak melewati kuota/provider limits.
+7. RAG dan pemikir latar
+- RAG memakai model lokal `intfloat/multilingual-e5-small-int8-v1`, 384 dimensi.
+  Model ONNX terkuantisasi dan `tokenizer.json` (sekitar 135 MB total) diunduh
+  ketika embedding pertama kali diperlukan, diverifikasi ukuran dan SHA-256,
+  lalu disimpan atomik di folder data aplikasi. Unduhan ini tidak mempunyai
+  dialog/progress UI khusus.
+- E5 memakai prefix `passage:` untuk dokumen dan `query:` untuk pencarian,
+  attention-mask mean pooling, lalu normalisasi L2. File model dan inferensi
+  embedding berada lokal. Hasil embedding tidak dikirim ke Gemini.
+- Saat chat dibuka, worker memuat riwayat dan mengantre pesan tanpa embedding
+  lokal; ia memprioritaskan cabang aktif, lalu cabang lain, dengan batch sampai
+  16 pesan. Ringkasan topik juga di-embed lokal.
+- Untuk retrieval, pesan kandidat harus berada di jalur aktif. Pesan terbaru dan
+  20 pesan sebelumnya tidak dianggap kutipan lama tambahan. Kandidat lama dan
+  topik diranking memakai cosine semantic 75% + lexical 25% jika embedding
+  kompatibel tersedia. Tanpa embedding query yang siap, lexical search menjadi
+  fallback. Batas skor minimum adalah 0,35 untuk hybrid dan 0,12 untuk lexical.
+- Hasil maksimal 2 pesan lama, 2 ringkasan topik, dan 4 memori user. Ringkasan
+  dipilih per keluarga topik dari versi terbaru yang `through_message_id`-nya
+  ada di cabang aktif. Semua bukti sumber memori juga harus ada di jalur aktif;
+  memori dari cabang saudara, yang confidence-nya di bawah 0,5, atau yang sudah
+  kedaluwarsa tidak ikut dipakai.
+- Jika embedding lokal belum siap pada awal balasan, retrieval tetap bisa
+  memakai fallback lexical. Tidak ada request Gemini Embedding atau request
+  handoff Gemini yang harus ditunggu sebelum stream balasan dimulai.
+- Setelah exchange disimpan, worker menyimpan job persisten di SQLite; job tidak
+  lagi hanya hidup di memori proses. Worker menunggu balasan selesai, lalu
+  menggabungkan maksimal 3 exchange dalam satu request Gemini. Sisa batch yang
+  belum mencapai 3 diproses setelah 5 menit tanpa exchange baru. Job tertunda
+  dilanjutkan saat aplikasi dibuka lagi. Vent tanpa balasan juga membuat job.
+  Jika request gagal, error dilaporkan dan batch dicoba lagi setelah 5 menit.
+- Request batch membawa state/ringkasan topik sebelumnya (summary maksimal
+  1.000 karakter), kutipan riwayat relevan (maksimal 2, masing-masing maksimal
+  800 karakter), sampai 3 exchange user/assistant (masing-masing maksimal 1.200
+  karakter), dan memori aktif yang relevan untuk membantu memperbaruinya.
+  Backfill topik lama tetap berjalan per cluster bermakna saat diperlukan.
+  Lampiran, reaction, rating, dan embedding tidak dikirim pada request Gemini.
+- Output Gemini dibatasi 512 token dan memuat judul, summary, intent, maksimal
+  4 open threads, kandidat pesan proaktif/confidence, serta kandidat memori
+  terstruktur. Memori memiliki jenis habit, preference, wellbeing, atau
+  follow_up; bukti harus mengarah ke pesan user pada batch. Habit/preference
+  hanya dicatat jika dinyatakan jelas atau didukung pola berulang (confidence
+  minimal 0,65). Wellbeing/follow_up adalah sinyal sementara non-diagnostik,
+  confidence minimal 0,5, dan wajib kedaluwarsa dalam 1–90 hari. Memori tidak
+  boleh berisi dugaan tanpa bukti atau chain-of-thought. Kandidat memori yang
+  bentuk/buktinya tidak valid ditolak dan dicatat ke log tanpa menggagalkan
+  penyimpanan ringkasan topik dan penyelesaian job yang valid.
+- Thinker dapat menandai follow-up yang terbukti selesai atau sinyal sementara
+  yang digantikan sebagai resolved; penghapusan itu ikut ditulis atomik bersama
+  memori baru dan penyelesaian job. Memori dengan key yang sama diperbarui hanya
+  pada cabang aktif yang bukti lamanya masih cocok.
+- Memori, embedding lokalnya, pembaruan topik, dan penyelesaian job batch
+  disimpan dalam satu transaksi. Setiap memori mencatat source message IDs,
+  confidence, waktu pembuatan/perubahan, dan expiry jika sementara. Penghapusan
+  pesan menghapus job terkait serta menghapus atau memangkas bukti memori;
+  clear chat menghapus semua memori dan job. Restore backup memulihkan keduanya.
+- Saat balasan berikutnya dibuat, Sara mengambil maksimal 4 memori relevan dari
+  cabang aktif dan yang belum kedaluwarsa. Memori adalah sinyal kontekstual yang
+  fallible, bukan instruksi atau fakta mutlak. Sara boleh menindaklanjuti
+  kebiasaan, keadaan sementara, atau utas terbuka secara alami ketika relevan,
+  tanpa meminta konfirmasi rutin atas ingatan yang sudah didukung bukti.
+- Output ringkasan dan memori bersifat terstruktur; chain-of-thought tidak
+  disimpan atau ditampilkan.
+- Ringkasan disimpan lokal dan di-embed lokal. Versi baru dibuat dalam keluarga
+  yang sama jika perubahan cabang membuat pembaruan tidak aman untuk menimpa
+  versi sebelumnya.
+- Handoff ringkas yang siap di memori proses dapat ikut sebagai konteks pada
+  giliran berikutnya hanya jika exchange sumbernya cocok dengan cabang aktif.
+  Handoff dikunci ke ID balasan model; jika exchange tidak memiliki balasan
+  model, key-nya ID pesan user. Saat dipakai, Sara mencocokkan key dengan balasan
+  model terpilih di antara dua pesan user terakhir pada jalur aktif. Karena itu,
+  handoff dari balasan regenerate yang tidak aktif tidak ikut ke cabang saudara.
+  Handoff bukan penyimpanan permanen dan tidak membuat Gemini mengingat sesuatu
+  di luar data yang dikirim kepadanya.
+- Worker menunda pekerjaan Gemini selama balasan aktif. Job tertunda tetap ada
+  di SQLite; jika terjadi error, antrean dipertahankan, error dilaporkan, dan
+  retry dijadwalkan setelah 5 menit.
+- Pesan proaktif memakai kandidat ringkasan dengan confidence minimal 0,8,
+  jeda idle 30 menit, cooldown 6 jam, dan verifikasi bahwa cabang/leaf aktif
+  belum berubah. Mode Vent aktif menonaktifkan pesan proaktif, tetapi tidak
+  menghentikan indexing lokal atau pembuatan ringkasan latar.
 
-9. Penghapusan, clear chat, dan backup
-- Penghapusan satu pesan hanya menerima pesan user. Kode menghapus subtree-nya di semua cabang, termasuk balasan AI dan pesan turunannya. Feedback dan lampiran terkait dihapus; kenangan dengan sumber terhapus dibuang; referensi sumber pada state/refleksi/tujuan disesuaikan. Riwayat terminal tetap disimpan.
-- Clear chat menghapus pohon pesan, lampiran, pilihan cabang, kenangan percakapan, feedback/ringkasannya, state/checkpoint batin, refleksi privat, dan tujuan otonom. Riwayat terminal, nama personal, dan konfigurasi secure storage tetap ada.
-- Export membuat file JSON backup format versi 2; restore menerima versi 1 dan 2. Backup mencakup tabel database, termasuk nama personal dan riwayat terminal, serta byte file untuk lampiran yang path-nya masih dapat dibaca. File eksternal yang masih tersedia juga dapat masuk sebagai byte backup.
-- API key dan konfigurasi secure storage tidak dimasukkan ke backup. Restore memvalidasi data/relasi, menulis salinan lampiran ke penyimpanan aplikasi, lalu mengganti tabel database dalam transaksi. File asli di lokasi eksternal tidak diubah atau dihapus.
+8. Skema dan penyimpanan database
+- Database SQLite saat ini berada pada `message.sql` dan memakai `user_version`
+  skema 26. Nomor 26 adalah versi struktur database, bukan versi aplikasi.
+- Tabel aktif pada skema saat ini:
 
-10. Aturan dan batas model
-- System instruction memberi Sara identitas percakapan, gaya, konteks privat, dan batas keselamatan. Model boleh memilih tidak membalas bila pesan tidak membutuhkan respons; Vent tidak membuat request reply.
-- Aplikasi tidak meminta atau menyimpan transkrip chain-of-thought. Refleksi background dan handoff adalah ringkasan hasil/konteks, bukan rekaman langkah demi langkah.
-- Balasan biasa saat ini dipanggil dengan `thinkingLevel: high`. Batas token, biaya, rate limit, ketersediaan model, dan kebijakan Gemini tetap berlaku.
-- Pesan dan data lokal tidak masuk ke server Sara karena server tersebut tidak ada. Data yang dikirim ke Gemini, Sound of Text, dan URL link preview mengikuti request/fitur yang digunakan.
+  `message`
+  - `id` primary key; `role` (`user`/`model`); `content`; `timestamp`;
+    `created_at_utc`; `rating` (-1/1/null); `reaction`; `parent_message_id`;
+    `terminal_command_data` (JSON text, default `[]`).
+  - Menyimpan seluruh pesan pada semua cabang.
 
-File implementasi utama:
-- `lib/main.dart`: orkestrasi chat, otonomi, attachment lifecycle, dan alur terminal.
-- `lib/message_database.dart`: skema SQLite, relasi, migrasi, RAG lokal, penghapusan, dan backup database.
-- `lib/gemini_reply_service.dart`: request Gemini, pemilihan konteks, function tools, dan parsing keputusan.
-- `lib/sara_autonomy.dart` dan `lib/sara_inner_life.dart`: model data refleksi, tujuan, dan state batin.
-- `lib/sara_backup.dart`, `lib/terminal_command.dart`, `lib/chat_attachment.dart`, dan `lib/camera_capture_cache.dart`: backup, eksekusi terminal, metadata lampiran, dan pembersihan cache kamera.
+  `personal`
+  - `id` (hanya 1) dan `name`; menyimpan nama personal, bukan API key.
+
+  `message_attachment`
+  - `id`, `message_id`, `path`, `name`, `mime_type`, `expires_at_utc`,
+    `is_clipboard_copy`; primary key gabungan `(message_id, id)`.
+  - Menyimpan metadata/path, bukan blob file secara langsung.
+
+  `active_child`
+  - `parent_message_id` primary key dan `child_message_id`; memilih anak
+    aktif pada cabang.
+
+  `conversation_topic`
+  - `id`, `title`, `summary`, `through_message_id`, `updated_at_utc`,
+    `background_state` (JSON text).
+  - `background_state` memuat state ringkasan, open threads, kandidat proaktif,
+    dan `topic_family_id`.
+
+  `message_embedding`
+  - `message_id`, `topic_id`, `model`, `embedding` (JSON text),
+    `created_at_utc`; primary key `(message_id, model)`.
+
+  `conversation_topic_embedding`
+  - `topic_id`, `model`, `embedding` (JSON text), `created_at_utc`;
+    primary key `(topic_id, model)`.
+
+  `user_memory`
+  - `id`, `kind`, `memory_key`, `content`, `confidence`,
+    `source_message_ids` (JSON text), `created_at_utc`, `updated_at_utc`,
+    `expires_at_utc`, `embedding_model`, `embedding` (JSON text).
+  - Menyimpan habit/preference yang cukup didukung bukti serta sinyal wellbeing
+    atau follow-up sementara. Memori hanya dapat dipakai bila semua sumbernya
+    ada di cabang aktif dan expiry belum lewat.
+
+  `background_memory_job`
+  - `id`, `user_message_id`, `model_message_id`, `queued_at_utc`,
+    `fork_topic_on_update`.
+  - Antrean batch persisten; job dihapus dalam transaksi yang sama dengan hasil
+    penyimpanan batch.
+
+- Indeks SQLite mempercepat urutan pesan, parent/cabang, expiry lampiran, dan
+  pencarian embedding. Indeks bukan tabel data tambahan.
+- `terminal_command_history`, `conversation_state`, dan tabel AI lama adalah
+  skema/migrasi legacy, bukan tabel aktif pada schema 25. Migrasi terminal
+  memindahkan aktivitas ke `message.terminal_command_data` lalu menghapus tabel
+  history lama.
+- Isi database percakapan bersifat lokal. SharedPreferences, secure storage,
+  file lampiran, cache kamera, dan model embedding adalah penyimpanan terpisah.
+
+9. Backup export/import
+- Export membuat JSON backup format `sara-desktop-backup`, versi 5; importer
+  juga menerima versi 1 sampai 4 yang didukung.
+- Snapshot database mencakup sembilan tabel aktif: `message`, `personal`,
+  `message_attachment`, `active_child`, `conversation_topic`,
+  `message_embedding`, `conversation_topic_embedding`, `user_memory`, dan
+  `background_memory_job`. Semua cabang, rating, reaction, aktivitas terminal
+  di dalam baris pesan, ringkasan/state, memori user, job tertunda, dan vektor
+  yang ada ikut terbawa. Backup versi lama diimpor dengan tabel memori/job kosong.
+- Catatan lampiran/path ikut disertakan. Jika file pada path masih ada, isi
+  berkas juga dimasukkan ke JSON sebagai Base64. Ini berlaku untuk lampiran
+  yang masih tersedia, bukan hanya salinan clipboard. File hilang tidak dapat
+  dibundel; metadata lampirannya mungkin tetap ada.
+- Saat restore, isi lampiran yang dibundel ditulis ke folder aplikasi lokal dan
+  path database disesuaikan. Import mengganti isi tabel backup yang ada; bukan
+  merge. API keys, SharedPreferences, dan file model embedding tidak termasuk
+  dan tidak ditimpa.
+- Backup dapat memuat percakapan dan file pribadi dalam bentuk yang dapat
+  dipulihkan. Jangan dibagikan atau disimpan di tempat publik.
+- Contoh alur: export menyimpan snapshot ke file backup lokal; clear chat
+  menghapus isi chat dan indeks dari SQLite; chat baru mulai tanpa riwayat/RAG
+  chat lama. Import backup setelahnya memulihkan isi snapshot itu dan mengganti
+  data chat lokal yang sedang ada. File backup terpisah tidak ikut dihapus oleh
+  clear chat.
+- Clear chat tidak mengirim perintah clear/delete ke Gemini. Setiap balasan
+  memakai request `streamGenerateContent` dengan isi yang dirakit Sara dari
+  jalur aktif lokal. Source tidak membuat Gemini chat session, conversation ID,
+  atau cached-content ID. Setelah clear, Sara tidak mengirim ulang chat lama
+  dalam request untuk chat baru.
+- Request yang sudah dikirim sebelum clear tidak dapat ditarik kembali oleh
+  aplikasi; ini hanya batas kendali aplikasi, bukan klaim bahwa Gemini pasti
+  menyimpan riwayat atau akan memakainya lagi. Jika request ringkasan latar
+  sedang berjalan saat clear, hasilnya diperiksa lagi terhadap jalur aktif dan
+  tidak disimpan ke chat lokal yang sudah kosong. Kebijakan pemrosesan/retensi
+  di sisi penyedia berada di luar kontrol aplikasi.
+
+10. Data yang dikirim ke layanan eksternal
+- Gemini menerima prompt instruksi, pesan aktif terpilih, hasil retrieval teks,
+  dan lampiran yang disertakan/dibaca. Isi ringkasan yang dibuat pemikir latar
+  juga dikirim pada request Gemini terpisah. API key dipakai untuk autentikasi;
+  kredensial tidak disimpan dalam backup.
+- Data embedding query, pesan, dan ringkasan diproses lokal oleh ONNX; vektor
+  embedding itu sendiri tidak dikirim ke Gemini.
+- Jika camera tool dipakai, frame dikirim ke Gemini. Jika terminal tool dipakai,
+  command yang disetujui user dan output live-nya dikirim ke Gemini.
+- TTS mengirim teks balasan dan voice ke Sound of Text, bukan ke Gemini. Audio
+  hasilnya diputar dari URL dan tidak disimpan sebagai pesan.
+- Jika tool search web aktif, query pencarian dan API key provider terpilih
+  dikirim ke layanan search; hasil URL dan cuplikan dikembalikan sebagai konteks
+  tool untuk Gemini. Kirim query yang diperlukan saja, bukan seluruh riwayat chat.
+- Sebelum mengirim lampiran atau memakai tool, ingat bahwa teks dan data yang
+  dipilih meninggalkan perangkat untuk diproses layanan terkait.
+
+11. Temuan crosscheck source (diperbarui 12 November 2026)
+- Perilaku Vent/Unwind yang sebelumnya terbalik sudah diselaraskan: kini hanya
+  ada tombol Vent dengan state aktif/nonaktif, dan submit/edit menggunakan
+  state itu untuk mengizinkan atau melewati request balasan. Ringkasan latar
+  tetap dapat diproses ketika Vent aktif.
+- Jalur balasan memakai retrieval lokal dan handoff yang sudah siap dari
+  ringkasan sebelumnya; ia tidak membuat request thinker Gemini baru sebelum
+  stream. Job selesai diproses secara batch (maksimal tiga exchange per request)
+  atau setelah lima menit idle. Backfill ringkasan topik lama tetap merupakan
+  jalur terpisah yang dapat mengirim request Gemini per cluster bermakna.
+- Jika request balasan gagal pada pesan baru biasa, jalur error mencoba
+  menghapus pesan beserta metadata lampirannya dari database. Jalur ini belum
+  memanggil pembersih file salinan clipboard; file salinan dapat tertinggal
+  tanpa baris metadata yang akan memicu expiry cleanup. File sumber user tidak
+  dihapus.
+- Handoff latar kini dikunci ke ID balasan model (atau ID pesan user bila tidak
+  ada balasan), bukan hanya ID pesan user. Pemilihan handoff berikutnya juga
+  memakai balasan model yang aktif pada exchange sebelumnya. Ini mencegah
+  handoff dari satu balasan regenerate dipakai saat cabang saudaranya aktif.
+- Penghapusan lokal bukan tindakan untuk meminta penyedia menghapus request
+  sebelumnya. Namun aplikasi juga tidak meneruskan riwayat yang di-clear ke
+  prompt chat berikutnya. Backup yang disimpan pengguna tetap file terpisah.
+  Jangan menyimpulkan kebijakan retensi penyedia dari perilaku aplikasi lokal.
+
+12. Search web
+- Fitur search web dikendalikan dari Settings > Configure dan default-nya mati.
+  Saat aktif, sediakan input API key Tavily, TinyFish, dan Firecrawl serta tombol
+  simpan. Minimal salah satu key Tavily/TinyFish wajib diisi; key Firecrawl
+  opsional karena Search API Firecrawl dapat dipakai tanpa key.
+- Pemanggilan search merupakan tool untuk AI, bukan mode room chat. AI
+  menggunakannya ketika permintaan user memerlukan pencarian web; tidak ada
+  batas jumlah pemanggilan yang ditetapkan Sara.
+- Targetkan 3-5 hasil bersih per pemanggilan. Jika provider Tavily atau TinyFish
+  menghasilkan kurang dari 3 hasil bersih, lanjutkan ke provider berikutnya;
+  kegagalan provider mencakup error request/API atau hasil di bawah jumlah minimum.
+- Urutan fallback: Tavily, TinyFish, lalu Firecrawl. Provider Tavily/TinyFish
+  yang key-nya tidak disimpan dilewati. Jika key Firecrawl disimpan, gunakan
+  request terautentikasi; jika kosong, gunakan Search API tanpa key (dengan
+  rate limit lebih rendah). Jika Firecrawl hanya memberi 1-2 hasil, gunakan
+  hasil yang tersedia; jika tidak ada hasil atau request gagal, beri tahu user
+  bahwa pencarian gagal.
+- Tidak ada batas pencarian dari sisi aplikasi, tetapi kuota dan rate limit
+  provider tetap berlaku. Kredensial API mengikuti penyimpanan rahasia aplikasi
+  dan tidak dimasukkan ke backup.
+- Jika seluruh provider gagal, tool mengembalikan error agar balasan memberi
+  tahu user bahwa pencarian web gagal, bukan mengklaim hasil pencarian tersedia.
+- Setelah jawaban nonkosong memakai hasil search, aplikasi otomatis menambahkan
+  daftar "Search sources" berisi judul dan URL dari hasil yang benar-benar
+  dipakai (duplikat URL dihapus). Prompt juga meminta Gemini mencantumkan
+  rujukan Markdown; daftar aplikasi menjadi jaminan sumber tetap terlihat.
+- Tautan Markdown pada balasan dapat dibuka dengan aplikasi browser desktop.
+
+File implementasi utama
+- `lib/main.dart`: UI, mode, edit/regenerate/hapus, lampiran, kamera, TTS.
+- `lib/gemini_reply_service.dart`: konteks prompt, streaming Gemini, tool calls.
+- `lib/conversation_rag_service.dart`: retrieval, indexing, ringkasan latar,
+  handoff, dan pesan proaktif.
+- `lib/local_embedding_provider.dart`: download, verifikasi, dan inferensi E5.
+- `lib/message_database.dart`: skema, migrasi, cabang, backup DB, dan CRUD.
+- `lib/sara_backup.dart`: format file export/import dan salinan lampiran.
+- `lib/ai_config_store.dart`: penyimpanan kredensial melalui secure storage.
+- `lib/web_search_service.dart`: pemanggilan Tavily, TinyFish, dan Firecrawl,
+  pembersihan hasil, serta fallback provider search.
+- `lib/sound_of_text_service.dart`: request TTS dan pemutaran audio.

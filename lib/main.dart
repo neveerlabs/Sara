@@ -30,6 +30,7 @@ import 'package:super_clipboard/super_clipboard.dart';
 import 'package:uuid/uuid.dart';
 
 import 'ai_config_store.dart';
+import 'web_search_service.dart';
 import 'app_localizations.dart';
 import 'attachment_file_policy.dart';
 import 'camera_capture.dart';
@@ -40,9 +41,7 @@ import 'gemini_reply_service.dart';
 import 'desktop_notification_service.dart';
 import 'link_preview_service.dart';
 import 'message_database.dart';
-import 'sara_autonomy.dart';
 import 'sara_backup.dart';
-import 'sara_inner_life.dart';
 import 'smart_text_input_formatter.dart';
 import 'sound_of_text_service.dart';
 import 'terminal_command.dart';
@@ -50,6 +49,17 @@ import 'terminal_command.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const SaraApp());
+}
+
+Future<void> _playNotificationSoundAsset(String assetPath) async {
+  MediaKit.ensureInitialized();
+  final player = Player();
+  try {
+    await player.open(Media('asset:///$assetPath'), play: true);
+    await player.stream.completed.firstWhere((completed) => completed);
+  } finally {
+    await player.dispose();
+  }
 }
 
 Future<Uint8List?> _readClipboardImageFromSystem() async {
@@ -72,11 +82,13 @@ Future<Uint8List?> _readClipboardImageFromSystem() async {
     return null;
   }
 
-  final targets = await Process.run(
-    'xclip',
-    ['-selection', 'clipboard', '-o', '-target', 'TARGETS'],
-    stdoutEncoding: utf8,
-  ).timeout(const Duration(seconds: 3));
+  final targets = await Process.run('xclip', [
+    '-selection',
+    'clipboard',
+    '-o',
+    '-target',
+    'TARGETS',
+  ], stdoutEncoding: utf8).timeout(const Duration(seconds: 3));
   if (targets.exitCode != 0) {
     throw ProcessException(
       'xclip',
@@ -93,15 +105,18 @@ Future<Uint8List?> _readClipboardImageFromSystem() async {
     'image/gif',
     'image/tiff',
   ];
-  final availableTargets =
-      (targets.stdout as String).split(RegExp(r'\s+')).toSet();
+  final availableTargets = (targets.stdout as String)
+      .split(RegExp(r'\s+'))
+      .toSet();
   for (final target in imageTargets) {
     if (!availableTargets.contains(target)) continue;
-    final image = await Process.run(
-      'xclip',
-      ['-selection', 'clipboard', '-o', '-target', target],
-      stdoutEncoding: null,
-    ).timeout(const Duration(seconds: 5));
+    final image = await Process.run('xclip', [
+      '-selection',
+      'clipboard',
+      '-o',
+      '-target',
+      target,
+    ], stdoutEncoding: null).timeout(const Duration(seconds: 5));
     if (image.exitCode != 0) {
       throw ProcessException(
         'xclip',
@@ -177,11 +192,13 @@ class _EmojiAwareTextEditingController extends TextEditingController {
       final isEmoji = _singleEmoji(grapheme) != null;
       final overlapsComposing =
           composing.isValid && composing.start < end && composing.end > offset;
-      TextStyle? spanStyle =
-          isEmoji ? const TextStyle(fontFamily: _emojiFontFamily) : null;
+      TextStyle? spanStyle = isEmoji
+          ? const TextStyle(fontFamily: _emojiFontFamily)
+          : null;
       if (overlapsComposing) {
-        spanStyle = (spanStyle ?? const TextStyle())
-            .merge(const TextStyle(decoration: TextDecoration.underline));
+        spanStyle = (spanStyle ?? const TextStyle()).merge(
+          const TextStyle(decoration: TextDecoration.underline),
+        );
       }
       spans.add(TextSpan(text: grapheme, style: spanStyle));
       offset = end;
@@ -250,7 +267,8 @@ void _showToast(
   final overlay = Overlay.maybeOf(context, rootOverlay: true);
   if (overlay == null) {
     debugPrint(
-        'Could not display notification because no overlay is available.');
+      'Could not display notification because no overlay is available.',
+    );
     return;
   }
   _activeToastTimer?.cancel();
@@ -283,10 +301,7 @@ void _showToast(
               ],
             ),
             child: Padding(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 16,
-                vertical: 8,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -393,6 +408,7 @@ class SaraApp extends StatefulWidget {
     this.cameraImageSaver,
     this.cameraCacheCleaner,
     this.notificationService,
+    this.notificationSoundPlayer,
   });
 
   final AiConfigStore configStore;
@@ -405,6 +421,7 @@ class SaraApp extends StatefulWidget {
   final Future<ChatAttachment> Function(Uint8List bytes)? cameraImageSaver;
   final Future<void> Function(MessageStore messageStore)? cameraCacheCleaner;
   final DesktopNotificationService? notificationService;
+  final Future<void> Function(String assetPath)? notificationSoundPlayer;
 
   @override
   State<SaraApp> createState() => _SaraAppState();
@@ -487,6 +504,7 @@ class _SaraAppState extends State<SaraApp> {
           cameraImageSaver: widget.cameraImageSaver,
           cameraCacheCleaner: widget.cameraCacheCleaner,
           notificationService: widget.notificationService,
+          notificationSoundPlayer: widget.notificationSoundPlayer,
         ),
       ),
     );
@@ -506,6 +524,7 @@ class ChatPage extends StatefulWidget {
     this.cameraImageSaver,
     this.cameraCacheCleaner,
     this.notificationService,
+    this.notificationSoundPlayer,
   });
 
   final AiConfigStore configStore;
@@ -518,6 +537,7 @@ class ChatPage extends StatefulWidget {
   final Future<ChatAttachment> Function(Uint8List bytes)? cameraImageSaver;
   final Future<void> Function(MessageStore messageStore)? cameraCacheCleaner;
   final DesktopNotificationService? notificationService;
+  final Future<void> Function(String assetPath)? notificationSoundPlayer;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -536,14 +556,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   final Map<String, int> _assistantFeedback = {};
   final Map<String, String> _assistantReactions = {};
   final Map<String, List<TerminalCommandHistoryEntry>>
-      _terminalActivitiesByResponse = {};
+  _terminalActivitiesByResponse = {};
   Map<String, MessageBranchNavigation> _messageBranches = {};
   Timer? _attachmentExpiryTimer;
-  Timer? _autonomyTimer;
   MessageStore? _messageStore;
   AiReplyService? _replyService;
-  bool _autonomyEnabled = true;
-  bool _autonomousCameraEnabled = false;
+  bool _cameraEnabled = false;
   bool _saraCameraActive = false;
   final ValueNotifier<bool> _saraCameraActiveListenable = ValueNotifier(false);
   final Set<Object> _activeSaraCameraUses = {};
@@ -554,12 +572,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   String _terminalCommandStderr = '';
   bool _terminalCommandRunning = false;
   bool _terminalCommandAutomaticallyAllowed = false;
-  bool _autonomyCycleRunning = false;
-  bool _autonomyCancelRequested = false;
-  int _autonomyConsecutiveFailures = 0;
-  int _autonomyContextRevision = 0;
-  String? _latestAutonomyThought;
-  _TemporaryResponseHandoff? _latestResponseHandoff;
   bool _applicationDetached = false;
   bool _applicationForeground = true;
   bool _chatRoomVisible = true;
@@ -567,9 +579,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   late final Future<void> Function(String message) _unseenErrorHandler;
   bool _isLoadingHistory = true;
   bool _isSending = false;
+  bool _proactiveModeAllows = false;
+  Completer<void>? _proactiveAppendCompletion;
   bool _isDraggingFiles = false;
   bool _hasStreamedReply = false;
   bool _showScrollToBottom = false;
+  bool _followLatestDuringStreaming = true;
+  String? _searchResultsMessageId;
   String? _regeneratingMessageId;
   String? _regeneratingUserMessageId;
   String? _streamingResponseMessageId;
@@ -582,10 +598,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _speechPlaybackController =
         widget.speechPlaybackController ?? SoundOfTextPlaybackController();
-    _unseenErrorHandler = (message) => _notifyWhenUnavailable(
-          message,
-          title: appText('Sara desktop app'),
-        );
+    _unseenErrorHandler = (message) =>
+        _notifyWhenUnavailable(message, title: appText('Sara desktop app'));
     _notifyUnseenError = _unseenErrorHandler;
     _scrollController.addListener(_handleScroll);
     _initialize();
@@ -604,14 +618,16 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     _messageController.dispose();
     _messageFocus.dispose();
     _attachmentExpiryTimer?.cancel();
-    _autonomyTimer?.cancel();
+    final replyService = _replyService;
+    if (replyService is GeminiReplyService) {
+      replyService.disposeConversationBackgroundTasks();
+    }
     _pendingTerminalCommandApproval?.complete(TerminalApprovalDecision.skip);
     unawaited(_terminalCommandRunner.stop());
     for (final cameraSession in _saraCameraSessions) {
       unawaited(cameraSession.dispose());
     }
     _saraCameraSessions.clear();
-    _cancelAutonomousThinking();
     _speechPlaybackController.dispose();
     _saraCameraActiveListenable.dispose();
     _scrollController.removeListener(_handleScroll);
@@ -624,17 +640,18 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     _applicationForeground = state == AppLifecycleState.resumed;
     if (state == AppLifecycleState.detached) {
       _applicationDetached = true;
-      _autonomyTimer?.cancel();
       unawaited(_stopSaraCameraUse());
       _pendingTerminalCommandApproval?.complete(TerminalApprovalDecision.skip);
       unawaited(_terminalCommandRunner.stop());
-      _cancelAutonomousThinking();
       final messageStore = _messageStore;
       if (messageStore != null) {
-        unawaited(_clearCameraCaptureCache(messageStore).catchError((error) {
-          debugPrint(
-              'Could not clear camera cache on application exit: $error');
-        }));
+        unawaited(
+          _clearCameraCaptureCache(messageStore).catchError((error) {
+            debugPrint(
+              'Could not clear camera cache on application exit: $error',
+            );
+          }),
+        );
       }
     }
   }
@@ -648,10 +665,19 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       );
     } catch (error) {
       if (!mounted) return;
-      _showMessage(appText(
-        'Speech playback failed: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText('Speech playback failed: {error}', values: {'error': error}),
+      );
+    }
+  }
+
+  Future<void> _playNotificationSound(String assetPath) async {
+    try {
+      await (widget.notificationSoundPlayer ?? _playNotificationSoundAsset)(
+        assetPath,
+      );
+    } catch (error) {
+      debugPrint('Could not play notification sound "$assetPath": $error');
     }
   }
 
@@ -660,11 +686,23 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       final messageStore =
           widget.messageStore ?? await SqliteMessageStore.open();
       final preferences = await SharedPreferences.getInstance();
-      final replyService = widget.replyService ??
+      final replyService =
+          widget.replyService ??
           GeminiReplyService(
             configStore: widget.configStore,
             preferences: preferences,
-            memoryStore: messageStore,
+            messageStore: messageStore,
+            onProactiveMessage: _appendProactiveMessage,
+            onBackgroundError: (error) {
+              if (mounted) {
+                _showMessage(
+                  appText(
+                    'Could not save conversation memory: {error}',
+                    values: {'error': error},
+                  ),
+                );
+              }
+            },
           );
       Object? expiryError;
       try {
@@ -674,11 +712,11 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         expiryError = error;
       }
       final history = await messageStore.loadActiveMessages();
-      final terminalActivities =
-          await messageStore.loadTerminalCommandActivities({
+      final terminalActivities = {
         for (final message in history)
-          if (message.role == 'model') message.id,
-      });
+          if (message.terminalActivities.isNotEmpty)
+            message.id: message.terminalActivities,
+      };
       final attachments = await messageStore.loadAttachments();
       final assistantFeedback = await messageStore.loadAssistantFeedback();
       final assistantReactions = await messageStore.loadAssistantReactions();
@@ -687,10 +725,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       setState(() {
         _messageStore = messageStore;
         _replyService = replyService;
-        _autonomyEnabled =
-            preferences.getBool('sara_autonomous_life_enabled') ?? true;
-        _autonomousCameraEnabled =
-            preferences.getBool('sara_autonomous_camera_enabled') ?? false;
+        _cameraEnabled = preferences.getBool('sara_camera_enabled') ?? false;
         _messages
           ..clear()
           ..addAll(history);
@@ -709,11 +744,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           ..addAll(terminalActivities);
         _isLoadingHistory = false;
       });
+      if (replyService is GeminiReplyService) {
+        unawaited(replyService.startConversationBackgroundTasks());
+      }
       _attachmentExpiryTimer ??= Timer.periodic(
         const Duration(minutes: 1),
         (_) => unawaited(_expireAttachmentsWhileOpen(messageStore)),
       );
-      _scheduleAutonomy(const Duration(seconds: 20));
       if (expiryError != null) {
         _showMessage(
           appText(
@@ -726,253 +763,26 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     } catch (error) {
       if (!mounted) return;
       setState(() => _isLoadingHistory = false);
-      _showMessage(appText(
-        'Could not open local chat storage: {error}',
-        values: {'error': error},
-      ));
-    }
-  }
-
-  void _scheduleAutonomy(Duration delay) {
-    _autonomyTimer?.cancel();
-    if (!mounted ||
-        _applicationDetached ||
-        !_autonomyEnabled ||
-        _replyService is! SaraAutonomousService ||
-        _messageStore == null) {
-      return;
-    }
-    _autonomyTimer = Timer(delay, () => unawaited(_runAutonomyCycle()));
-  }
-
-  Future<void> _runAutonomyCycle() async {
-    final messageStore = _messageStore;
-    final service = _replyService;
-    if (!mounted || !_autonomyEnabled || messageStore == null) {
-      return;
-    }
-    if (service is! SaraAutonomousService) {
-      return;
-    }
-    final autonomyService = service as SaraAutonomousService;
-    if (_autonomyCycleRunning) {
-      _scheduleAutonomy(const Duration(minutes: 1));
-      return;
-    }
-
-    _autonomyCycleRunning = true;
-    var nextDelay = const Duration(minutes: 15);
-    try {
-      final contextRevision = _autonomyContextRevision;
-      final history = await messageStore.loadActiveMessages();
-      final historyIds = history.map((message) => message.id).toList();
-      final expectedLeafId = historyIds.isEmpty ? null : historyIds.last;
-      final innerLife = await messageStore.loadSaraInnerLifeForPath(historyIds);
-      final currentGoals =
-          await messageStore.loadAutonomyGoalsForPath(historyIds);
-      final personalName = await messageStore.readPersonalName();
-      final storedHandoff = _latestResponseHandoff;
-      final responseHandoff = storedHandoff != null &&
-              storedHandoff.handoff.isValidForPath(historyIds)
-          ? storedHandoff
-          : null;
-      if (storedHandoff != null && responseHandoff == null) {
-        _latestResponseHandoff = null;
-      }
-      final decision = await autonomyService.thinkAutonomously(
-        activeMessageIds: historyIds,
-        personalName: personalName,
-        innerLifeSummary: jsonEncode(innerLife.toMap()),
-        currentGoals: currentGoals,
-        responseHandoff: responseHandoff?.handoff,
-        captureCameraFrame: _cameraToolAvailable ? _captureFrameForSara : null,
-      );
-      if (decision.reflection.trim().isEmpty ||
-          decision.reflection.length > saraMaxAutonomyReflectionLength ||
-          !const {'think', 'rest', 'reach_out'}.contains(decision.action) ||
-          decision.nextCheckMinutes < 1 ||
-          decision.nextCheckMinutes > saraMaxAutonomyDelayMinutes ||
-          (decision.action == 'reach_out' &&
-              (decision.message == null ||
-                  decision.message!.trim().isEmpty ||
-                  decision.message!.length > 1200))) {
-        throw StateError('Sara returned an invalid autonomy decision.');
-      }
-      if (decision.goalUpdates.length > 8) {
-        throw StateError('Sara returned too many goal updates.');
-      }
-      if (decision.remember &&
-          decision.sourceMessageIds.any((id) => !historyIds.contains(id))) {
-        throw StateError('Sara returned an invalid memory source.');
-      }
-      if (responseHandoff != null &&
-          identical(_latestResponseHandoff, responseHandoff)) {
-        responseHandoff.remainingCycles--;
-        if (responseHandoff.remainingCycles <= 0) {
-          _latestResponseHandoff = null;
-        }
-      }
-      _latestAutonomyThought = decision.reflection;
-      if (decision.remember) {
-        final thought = SaraPrivateThought(
-          id: _uuid.v4(),
-          reflection: decision.reflection,
-          action: decision.action,
-          isRemembered: true,
-          sourceMessageIds: decision.sourceMessageIds,
-          createdAtUtc: DateTime.now().toUtc().millisecondsSinceEpoch,
-        );
-        await messageStore.savePrivateThoughtIfSourcesExist(thought);
-      }
-      nextDelay = Duration(minutes: decision.nextCheckMinutes);
-      if (_autonomyCancelRequested) {
-        nextDelay = const Duration(minutes: 1);
-        return;
-      }
-      if (!mounted || !_autonomyEnabled) return;
-
-      final currentHistory = await messageStore.loadActiveMessages();
-      final currentIds = currentHistory.map((message) => message.id).toList();
-      final contextUnchanged = _autonomyContextRevision == contextRevision &&
-          _sameMessagePath(historyIds, currentIds);
-
-      final nowUtc = DateTime.now().toUtc().millisecondsSinceEpoch;
-      if (!mounted || !_autonomyEnabled) return;
-      if (!contextUnchanged) {
-        _autonomyConsecutiveFailures = 0;
-        nextDelay = const Duration(minutes: 1);
-        return;
-      }
-
-      final stateNow = innerLife.asOf(nowUtc);
-      final updatedInnerLife = SaraInnerLife(
-        mood: decision.innerLife.mood,
-        moodIntensity: ((stateNow.moodIntensity * 0.65) +
-                (decision.innerLife.moodIntensity * 0.35))
-            .round()
-            .clamp(0, 100),
-        energy: ((stateNow.energy * 0.65) + (decision.innerLife.energy * 0.35))
-            .round()
-            .clamp(0, 100),
-        drives: {
-          for (final drive in saraDriveOptions)
-            drive: ((stateNow.drives[drive]! * 0.65) +
-                    (decision.innerLife.drives[drive]! * 0.35))
-                .round()
-                .clamp(0, 100),
-        },
-        selfReflection: decision.reflection,
-        sourceMessageIds: historyIds
-            .skip(math.max(0, historyIds.length - 10))
-            .toList(growable: false),
-        updatedAtUtc: nowUtc,
-      );
-      if (expectedLeafId == null) {
-        await messageStore.saveSaraInnerLife(updatedInnerLife);
-      } else {
-        await messageStore.saveSaraInnerLifeIfActiveLeaf(
-          updatedInnerLife,
-          expectedLeafId: expectedLeafId,
-        );
-        final goalUpdates = decision.goalUpdates
-            .map((update) => SaraAutonomyGoal(
-                  id: update.id ?? _uuid.v4(),
-                  title: update.title,
-                  description: update.description,
-                  status: update.status,
-                  sourceMessageIds: update.sourceMessageIds,
-                  updatedAtUtc: nowUtc,
-                  branchMessageId: expectedLeafId,
-                ))
-            .toList(growable: false);
-        await messageStore.saveAutonomyGoalsForBranch(
-          goalUpdates,
-          expectedLeafId,
-        );
-      }
-
-      final message = decision.message;
-      if (decision.action == 'reach_out' &&
-          message != null &&
-          message.trim().isNotEmpty &&
-          !_isSending) {
-        final spontaneousMessage = _newMessage(
-          role: 'model',
-          content: message,
-          parentMessageId: expectedLeafId,
-        );
-        if (mounted) setState(() => _isSending = true);
-        try {
-          final appended = await messageStore.appendMessageIfActiveLeaf(
-            spontaneousMessage,
-            expectedLeafId: expectedLeafId,
-          );
-          if (appended && mounted) {
-            await _refreshActivePath(messageStore);
-            await _notifyWhenUnavailable(
-              message,
-              title: appText('Sara sent you a message'),
-            );
-          }
-        } finally {
-          if (mounted) setState(() => _isSending = false);
-        }
-      }
-      _autonomyConsecutiveFailures = 0;
-    } catch (error) {
-      if (_autonomyCancelRequested) {
-        nextDelay = const Duration(minutes: 1);
-      } else {
-        _autonomyConsecutiveFailures++;
-        final exponent = math.min(_autonomyConsecutiveFailures - 1, 6);
-        nextDelay = Duration(minutes: math.min(60, 1 << exponent));
-        debugPrint('Sara autonomous cycle failed: $error');
-      }
-      if (!_autonomyCancelRequested && mounted && _autonomyEnabled) {
-        _showMessage(appText(
-          'Autonomous thinking failed: {error}',
+      _showMessage(
+        appText(
+          'Could not open local chat storage: {error}',
           values: {'error': error},
-        ));
-      }
-    } finally {
-      _autonomyCycleRunning = false;
-      _autonomyCancelRequested = false;
-      _scheduleAutonomy(nextDelay);
+        ),
+      );
     }
   }
 
-  bool _sameMessagePath(List<String> first, List<String> second) {
-    if (first.length != second.length) return false;
-    for (var index = 0; index < first.length; index++) {
-      if (first[index] != second[index]) return false;
-    }
-    return true;
-  }
+  bool get _cameraToolAvailable => _cameraEnabled && !_applicationDetached;
 
-  void _clearResponseHandoff() {
-    _latestResponseHandoff = null;
-  }
-
-  Future<void> _setAutonomyEnabled(bool enabled) async {
-    final preferences = await SharedPreferences.getInstance();
-    final saved =
-        await preferences.setBool('sara_autonomous_life_enabled', enabled);
-    if (!saved) {
-      throw StateError('Could not save Sara’s autonomous life setting.');
-    }
-    if (!mounted) return;
-    setState(() => _autonomyEnabled = enabled);
-    if (enabled) {
-      _scheduleAutonomy(const Duration(seconds: 1));
-    } else {
-      _clearResponseHandoff();
-      _autonomyTimer?.cancel();
-      _cancelAutonomousThinking();
+  void _recordConversationProactiveMode(bool allowProactive) {
+    _proactiveModeAllows = allowProactive;
+    final replyService = _replyService;
+    if (replyService is GeminiReplyService) {
+      replyService.recordConversationUserActivity(
+        allowProactive: allowProactive,
+      );
     }
   }
-
-  bool get _cameraToolAvailable =>
-      _autonomousCameraEnabled && !_applicationDetached;
 
   void _refreshSaraCameraActive() {
     final active = _activeSaraCameraUses.isNotEmpty;
@@ -982,20 +792,14 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     setState(() {});
   }
 
-  Future<void> _setAutonomousCameraEnabled(bool enabled) async {
+  Future<void> _setCameraEnabled(bool enabled) async {
     final preferences = await SharedPreferences.getInstance();
-    final saved =
-        await preferences.setBool('sara_autonomous_camera_enabled', enabled);
-    if (!saved) {
+    final saved = await preferences.setBool('sara_camera_enabled', enabled);
+    if (!saved)
       throw StateError('Could not save Sara’s camera access setting.');
-    }
     if (!mounted) return;
-    setState(() {
-      _autonomousCameraEnabled = enabled;
-    });
-    if (!enabled) {
-      await _stopSaraCameraUse();
-    }
+    setState(() => _cameraEnabled = enabled);
+    if (!enabled) await _stopSaraCameraUse();
   }
 
   Future<void> _stopSaraCameraUse() async {
@@ -1011,10 +815,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
     _activeSaraCameraUses.clear();
     _refreshSaraCameraActive();
-    if (_autonomyCycleRunning) _cancelAutonomousThinking();
     if (disposalError != null) {
       throw StateError(
-          'Could not close the active Sara camera: $disposalError');
+        'Could not close the active Sara camera: $disposalError',
+      );
     }
   }
 
@@ -1036,9 +840,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       }
       final frameBytes = await session.frames.first.timeout(
         const Duration(seconds: 8),
-        onTimeout: () => throw TimeoutException(
-          'Timed out waiting for a camera frame.',
-        ),
+        onTimeout: () =>
+            throw TimeoutException('Timed out waiting for a camera frame.'),
       );
       if (!_cameraToolAvailable) {
         throw StateError('Sara’s camera access is no longer available.');
@@ -1048,14 +851,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       session = null;
 
       final cacheDirectory = await getApplicationCacheDirectory();
-      final saraCameraDirectory = Directory(path.join(
-        cacheDirectory.path,
-        'Sara',
-        'autonomous-camera',
-      ));
+      final saraCameraDirectory = Directory(
+        path.join(cacheDirectory.path, 'Sara', 'camera-capture'),
+      );
       await saraCameraDirectory.create(recursive: true);
-      final capturedFile =
-          File(path.join(saraCameraDirectory.path, '${_uuid.v4()}.jpg'));
+      final capturedFile = File(
+        path.join(saraCameraDirectory.path, '${_uuid.v4()}.jpg'),
+      );
       frameFile = capturedFile;
       await capturedFile.writeAsBytes(frameBytes, flush: true);
       final bytes = await capturedFile.readAsBytes();
@@ -1063,13 +865,15 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         bytes: bytes,
         dispose: () async {
           try {
-            final absolutePath =
-                path.normalize(path.absolute(capturedFile.path));
-            final absoluteDirectory =
-                path.normalize(path.absolute(saraCameraDirectory.path));
+            final absolutePath = path.normalize(
+              path.absolute(capturedFile.path),
+            );
+            final absoluteDirectory = path.normalize(
+              path.absolute(saraCameraDirectory.path),
+            );
             if (!path.isWithin(absoluteDirectory, absolutePath)) {
               throw StateError(
-                'Refusing to delete an autonomous camera frame outside app cache.',
+                'Refusing to delete an camera frame outside app cache.',
               );
             }
             if (await capturedFile.exists()) await capturedFile.delete();
@@ -1104,13 +908,15 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
     final pending = _PendingTerminalCommandApproval(request);
     setState(() => _pendingTerminalCommandApproval = pending);
-    unawaited(_notifyWhenUnavailable(
-      appText(
-        'Sara wants permission to run this terminal command:\n{command}',
-        values: {'command': request.command},
+    unawaited(
+      _notifyWhenUnavailable(
+        appText(
+          'Sara wants permission to run this terminal command:\n{command}',
+          values: {'command': request.command},
+        ),
+        title: appText('Sara needs your approval'),
       ),
-      title: appText('Sara needs your approval'),
-    ));
+    );
     try {
       return await pending.decision.future;
     } finally {
@@ -1141,13 +947,15 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
   void _updateTerminalCommandActivity(
     TerminalCommandRequest request, {
+    required String ownerMessageId,
     required bool running,
     required bool automaticallyAllowed,
   }) {
     if (!mounted) return;
+    final responseMessageId = request.responseMessageId ?? ownerMessageId;
     setState(() {
       if (running) {
-        _upsertPendingTerminalActivity(request, 'Running');
+        _upsertPendingTerminalActivity(request, responseMessageId, 'Running');
         _terminalCommandActivity = request;
         _terminalCommandRunning = true;
         _terminalCommandAutomaticallyAllowed = automaticallyAllowed;
@@ -1160,20 +968,21 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         _terminalCommandStdout = '';
         _terminalCommandStderr = '';
       } else {
-        _upsertPendingTerminalActivity(request, 'Awaiting approval');
+        _upsertPendingTerminalActivity(
+          request,
+          responseMessageId,
+          'Awaiting approval',
+        );
       }
     });
   }
 
   void _upsertPendingTerminalActivity(
     TerminalCommandRequest request,
+    String ownerMessageId,
     String status,
   ) {
-    final responseId = request.responseMessageId;
-    if (responseId == null) return;
-    final activities = [
-      ...?_terminalActivitiesByResponse[responseId],
-    ];
+    final activities = [...?_terminalActivitiesByResponse[ownerMessageId]];
     final matchingIndex = activities.lastIndexWhere(
       (activity) =>
           activity.command == request.command &&
@@ -1181,7 +990,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           const {'Awaiting approval', 'Running'}.contains(activity.error),
     );
     final pending = TerminalCommandHistoryEntry(
-      responseMessageId: responseId,
+      responseMessageId: request.responseMessageId,
       taskContext: request.taskContext,
       command: request.command,
       workingDirectory: request.workingDirectory,
@@ -1200,50 +1009,50 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     } else {
       activities.add(pending);
     }
-    _terminalActivitiesByResponse[responseId] = activities;
+    _terminalActivitiesByResponse[ownerMessageId] = activities;
   }
 
   Future<void> _recordTerminalCommandResult(
     TerminalCommandResult result,
+    String ownerMessageId,
   ) async {
     final entry = TerminalCommandHistoryEntry.fromResult(result);
-    final responseId = entry.responseMessageId;
-    if (mounted && responseId != null) {
+    final responseMessageId =
+        result.request.responseMessageId ?? ownerMessageId;
+    final activities = [...?_terminalActivitiesByResponse[responseMessageId]];
+    final pendingIndex = activities.lastIndexWhere(
+      (activity) =>
+          activity.command == entry.command &&
+          activity.error != null &&
+          const {'Awaiting approval', 'Running'}.contains(activity.error),
+    );
+    if (pendingIndex >= 0) {
+      activities[pendingIndex] = entry;
+    } else {
+      activities.add(entry);
+    }
+    if (mounted) {
       setState(() {
-        final activities = [
-          ...?_terminalActivitiesByResponse[responseId],
-        ];
-        final pendingIndex = activities.lastIndexWhere(
-          (activity) =>
-              activity.command == entry.command &&
-              activity.error != null &&
-              const {'Awaiting approval', 'Running'}.contains(activity.error),
-        );
-        if (pendingIndex >= 0) {
-          activities[pendingIndex] = entry;
-        } else {
-          activities.add(entry);
-        }
-        _terminalActivitiesByResponse[responseId] = activities;
+        _terminalActivitiesByResponse[responseMessageId] = activities;
       });
     }
     final messageStore = _messageStore;
     if (messageStore == null) {
       if (mounted) {
-        _showMessage(
-            appText('Terminal command history storage is unavailable.'));
+        _showMessage(appText('Message storage is unavailable.'));
       }
       return;
     }
     try {
-      await messageStore.saveTerminalCommandHistory(
-        entry,
+      await messageStore.saveTerminalCommandActivities(
+        ownerMessageId,
+        activities,
       );
     } catch (error) {
       if (!mounted) return;
       _showMessage(
         appText(
-          'Could not save terminal command history: {error}',
+          'Could not save terminal activity: {error}',
           values: {'error': error},
         ),
       );
@@ -1255,30 +1064,26 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       await _terminalCommandRunner.stop();
     } catch (error) {
       if (!mounted) return;
-      _showMessage(appText(
-        'Could not stop terminal command: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Could not stop terminal command: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
-  Future<void> _stopAutonomousCameraFromIndicator() async {
+  Future<void> _stopCameraFromIndicator() async {
     try {
-      await _setAutonomousCameraEnabled(false);
+      await _setCameraEnabled(false);
     } catch (error) {
       if (!mounted) return;
-      _showMessage(appText(
-        'Could not update Sara’s camera access setting: {error}',
-        values: {'error': error},
-      ));
-    }
-  }
-
-  void _cancelAutonomousThinking() {
-    final service = _replyService;
-    if (service is SaraAutonomousService) {
-      if (_autonomyCycleRunning) _autonomyCancelRequested = true;
-      (service as SaraAutonomousService).cancelAutonomousThinking();
+      _showMessage(
+        appText(
+          'Could not update Sara’s camera access setting: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
@@ -1286,13 +1091,16 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     final nowUtc = DateTime.now().toUtc().millisecondsSinceEpoch;
     final expired = await messageStore.loadExpiredAttachments(nowUtc);
     if (expired.isEmpty) return;
-    final expiredClipboard =
-        expired.where((item) => item.isClipboardCopy).toList(growable: false);
+    final expiredClipboard = expired
+        .where((item) => item.isClipboardCopy)
+        .toList(growable: false);
     if (expiredClipboard.isNotEmpty) {
       final supportDirectory = await getApplicationSupportDirectory();
-      final clipboardDirectory = path.normalize(path.absolute(
-        path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
-      ));
+      final clipboardDirectory = path.normalize(
+        path.absolute(
+          path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
+        ),
+      );
       for (final attachment in expiredClipboard) {
         final filePath = attachment.path;
         if (filePath == null) continue;
@@ -1337,12 +1145,62 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     } catch (error) {
       debugPrint('Attachment expiry cleanup failed: $error');
       if (mounted) {
-        _showMessage(appText(
-          'Could not remove expired attachment paths: {error}',
-          values: {'error': error},
-        ));
+        _showMessage(
+          appText(
+            'Could not remove expired attachment paths: {error}',
+            values: {'error': error},
+          ),
+        );
       }
     }
+  }
+
+  Future<ChatMessage?> _appendProactiveMessage(
+    String content,
+    String expectedLeafId,
+  ) async {
+    final messageStore = _messageStore;
+    if (!mounted ||
+        _isSending ||
+        !_proactiveModeAllows ||
+        _messageController.text.trim().isNotEmpty ||
+        messageStore == null) {
+      return null;
+    }
+    final completion = Completer<void>();
+    _proactiveAppendCompletion = completion;
+    try {
+      final message = _newMessage(
+        role: 'model',
+        content: content,
+        parentMessageId: expectedLeafId,
+      );
+      if (!await messageStore.appendMessageIfActiveLeaf(
+        message,
+        expectedLeafId: expectedLeafId,
+      )) {
+        return null;
+      }
+      await _refreshActivePath(messageStore);
+      if (!mounted) return message;
+      unawaited(_playNotificationSound('assets/sound/received.mp3'));
+      unawaited(
+        _notifyWhenUnavailable(
+          content,
+          title: appText('Sara sent you a message'),
+        ),
+      );
+      return message;
+    } finally {
+      if (identical(_proactiveAppendCompletion, completion)) {
+        _proactiveAppendCompletion = null;
+      }
+      completion.complete();
+    }
+  }
+
+  Future<void> _waitForProactiveAppend() async {
+    await _proactiveAppendCompletion?.future;
   }
 
   Future<void> _sendMessage(
@@ -1350,15 +1208,17 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     List<ChatAttachment> attachments = const [],
     bool allowAiReply = true,
   ]) async {
+    await _waitForProactiveAppend();
+    if (_isSending) return;
     final text = (suggestion ?? _messageController.text).trim();
-    if ((text.isEmpty && attachments.isEmpty) || _isSending) return;
+    if (text.isEmpty && attachments.isEmpty) return;
 
     final messageStore = _messageStore;
     final replyService = _replyService;
     if (messageStore == null || replyService == null) {
-      _showMessage(appText(
-        'Local chat storage is not ready. Please try again shortly.',
-      ));
+      _showMessage(
+        appText('Local chat storage is not ready. Please try again shortly.'),
+      );
       return;
     }
 
@@ -1367,8 +1227,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       content: text,
       parentMessageId: _messages.isEmpty ? null : _messages.last.id,
     );
-    _clearResponseHandoff();
-    _autonomyContextRevision++;
     setState(() {
       _isSending = true;
       _hasStreamedReply = false;
@@ -1394,8 +1252,16 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       }
       return;
     }
+    unawaited(_playNotificationSound('assets/sound/send.mp3'));
 
     if (!allowAiReply) {
+      if (replyService is GeminiReplyService) {
+        _recordConversationProactiveMode(false);
+        replyService.enqueueConversationMemory(
+          userMessage: userMessage,
+          modelMessage: null,
+        );
+      }
       if (mounted) setState(() => _isSending = false);
       return;
     }
@@ -1408,11 +1274,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     List<ChatAttachment> attachments,
     bool allowAiReply,
   ) async {
+    await _waitForProactiveAppend();
     if (_isSending) return;
     final messageStore = _messageStore;
     final replyService = _replyService;
-    final sourceIndex =
-        _messages.indexWhere((message) => message.id == messageId);
+    final sourceIndex = _messages.indexWhere(
+      (message) => message.id == messageId,
+    );
     if (messageStore == null ||
         replyService == null ||
         sourceIndex < 0 ||
@@ -1423,20 +1291,21 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     final text = content.trim();
     if (text.isEmpty && attachments.isEmpty) return;
     final original = _messages[sourceIndex];
-    _clearResponseHandoff();
-    _autonomyContextRevision++;
     setState(() => _isSending = true);
     late final List<ChatAttachment> branchAttachments;
     try {
-      branchAttachments =
-          await _duplicateAttachmentsForEditedBranch(attachments);
+      branchAttachments = await _duplicateAttachmentsForEditedBranch(
+        attachments,
+      );
     } catch (error) {
       if (!mounted) return;
       setState(() => _isSending = false);
-      _showMessage(appText(
-        'Could not prepare edited message attachments: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Could not prepare edited message attachments: {error}',
+          values: {'error': error},
+        ),
+      );
       return;
     }
     final editedMessage = _newMessage(
@@ -1472,14 +1341,23 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         );
         _isSending = false;
       });
-      _showMessage(appText(
-        'Message could not be saved: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Message could not be saved: {error}',
+          values: {'error': error},
+        ),
+      );
       return;
     }
 
     if (!allowAiReply) {
+      if (replyService is GeminiReplyService) {
+        _recordConversationProactiveMode(false);
+        replyService.enqueueConversationMemory(
+          userMessage: editedMessage,
+          modelMessage: null,
+        );
+      }
       if (mounted) setState(() => _isSending = false);
       return;
     }
@@ -1491,32 +1369,41 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   ) async {
     if (attachments.isEmpty) return const [];
     final clipboardAttachments = attachments
-        .where((attachment) =>
-            attachment.isClipboardCopy && attachment.path != null)
+        .where(
+          (attachment) => attachment.isClipboardCopy && attachment.path != null,
+        )
         .toList(growable: false);
     if (clipboardAttachments.isEmpty) {
       return attachments
-          .map((attachment) => ChatAttachment(
-                id: _uuid.v4(),
-                path: attachment.path,
-                name: attachment.name,
-                mimeType: attachment.mimeType,
-                expiresAtUtc: attachment.expiresAtUtc,
-                isClipboardCopy: attachment.isClipboardCopy,
-              ))
+          .map(
+            (attachment) => ChatAttachment(
+              id: _uuid.v4(),
+              path: attachment.path,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              expiresAtUtc: attachment.expiresAtUtc,
+              isClipboardCopy: attachment.isClipboardCopy,
+            ),
+          )
           .toList(growable: false);
     }
     final supportDirectory = await getApplicationSupportDirectory();
     final cacheDirectory = await getApplicationCacheDirectory();
-    final clipboardDirectory = path.normalize(path.absolute(
-      path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
-    ));
-    final cameraDirectory = path.normalize(path.absolute(
-      path.join(cacheDirectory.path, 'Sara', 'camera-attachments'),
-    ));
-    final legacyCameraDirectory = path.normalize(path.absolute(
-      path.join(supportDirectory.path, 'Sara', 'camera-attachments'),
-    ));
+    final clipboardDirectory = path.normalize(
+      path.absolute(
+        path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
+      ),
+    );
+    final cameraDirectory = path.normalize(
+      path.absolute(
+        path.join(cacheDirectory.path, 'Sara', 'camera-attachments'),
+      ),
+    );
+    final legacyCameraDirectory = path.normalize(
+      path.absolute(
+        path.join(supportDirectory.path, 'Sara', 'camera-attachments'),
+      ),
+    );
     final copiedFiles = <File>[];
     try {
       final result = <ChatAttachment>[];
@@ -1544,14 +1431,16 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
             attachmentPath = null;
           }
         }
-        result.add(ChatAttachment(
-          id: _uuid.v4(),
-          path: attachmentPath,
-          name: attachment.name,
-          mimeType: attachment.mimeType,
-          expiresAtUtc: attachment.expiresAtUtc,
-          isClipboardCopy: attachment.isClipboardCopy,
-        ));
+        result.add(
+          ChatAttachment(
+            id: _uuid.v4(),
+            path: attachmentPath,
+            name: attachment.name,
+            mimeType: attachment.mimeType,
+            expiresAtUtc: attachment.expiresAtUtc,
+            isClipboardCopy: attachment.isClipboardCopy,
+          ),
+        );
       }
       return result;
     } catch (error) {
@@ -1580,6 +1469,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     if (messageStore == null || replyService == null || index == -1) return;
 
     final userMessage = _messages[index];
+    final persistedUserMessage = userMessage.withTerminalActivities(
+      _terminalActivitiesByResponse[messageId] ??
+          userMessage.terminalActivities,
+    );
     final cachedReply = _repliesNeedingSave[messageId];
     setState(() {
       _isSending = true;
@@ -1588,7 +1481,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     if (cachedReply != null) {
       try {
         await messageStore.saveExchangeWithAttachments(
-          [userMessage, cachedReply],
+          [persistedUserMessage, cachedReply],
           userMessage.id,
           _attachmentsByMessage[userMessage.id] ?? const [],
           additionalAttachments: {
@@ -1596,6 +1489,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
               cachedReply.id: _attachmentsByMessage[cachedReply.id]!,
           },
         );
+        if (cachedReply.terminalActivities.isNotEmpty) {
+          await messageStore.moveTerminalCommandActivities(
+            userMessage.id,
+            cachedReply.id,
+          );
+        }
         await _refreshActivePath(messageStore);
         if (!mounted) return;
         setState(() {
@@ -1613,16 +1512,16 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           );
           _isSending = false;
         });
-        _showMessage(appText(
-          'Could not save message. Tap retry to try again.',
-        ));
+        _showMessage(
+          appText('Could not save message. Tap retry to try again.'),
+        );
       }
       return;
     }
     if (_messagesNeedingOnlySave.contains(messageId)) {
       try {
         await messageStore.saveExchangeWithAttachments(
-          [userMessage],
+          [persistedUserMessage],
           userMessage.id,
           _attachmentsByMessage[messageId] ?? const [],
         );
@@ -1648,7 +1547,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
     try {
       await messageStore.saveExchangeWithAttachments(
-        [userMessage],
+        [persistedUserMessage],
         userMessage.id,
         _attachmentsByMessage[messageId] ?? const [],
       );
@@ -1669,6 +1568,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   }
 
   Future<void> _deleteMessageAndFollowing(String messageId) async {
+    await _waitForProactiveAppend();
     if (_isSending) return;
     final messageStore = _messageStore;
     final index = _messages.indexWhere((message) => message.id == messageId);
@@ -1694,10 +1594,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       ids = await messageStore.loadSubtreeMessageIds(messageId);
     } catch (error) {
       if (!mounted) return;
-      _showMessage(appText(
-        'Could not delete message: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText('Could not delete message: {error}', values: {'error': error}),
+      );
       return;
     }
     final clipboardAttachments = ids
@@ -1708,10 +1607,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       await messageStore.deleteMessages(ids);
     } catch (error) {
       if (!mounted) return;
-      _showMessage(appText(
-        'Could not delete message: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText('Could not delete message: {error}', values: {'error': error}),
+      );
       return;
     }
 
@@ -1735,30 +1633,26 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       }
     } catch (error) {
       if (!mounted) return;
-      _showMessage(appText(
-        'Messages deleted, but copied attachment cleanup failed: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Messages deleted, but copied attachment cleanup failed: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
   Future<void> _refreshActivePath(MessageStore messageStore) async {
     final messages = await messageStore.loadActiveMessages();
-    final terminalActivities =
-        await messageStore.loadTerminalCommandActivities({
+    final terminalActivities = {
       for (final message in messages)
-        if (message.role == 'model') message.id,
-    });
+        if (message.terminalActivities.isNotEmpty)
+          message.id: message.terminalActivities,
+    };
     final branches = await messageStore.loadMessageBranches();
     final attachments = await messageStore.loadAttachments();
     final feedback = await messageStore.loadAssistantFeedback();
     final reactions = await messageStore.loadAssistantReactions();
-    final handoff = _latestResponseHandoff;
-    if (handoff != null &&
-        !handoff.handoff
-            .isValidForPath(messages.map((message) => message.id))) {
-      _latestResponseHandoff = null;
-    }
     if (!mounted) return;
     setState(() {
       _messages
@@ -1782,28 +1676,63 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   }
 
   Future<void> _activateMessageBranch(String messageId) async {
+    await _waitForProactiveAppend();
     final messageStore = _messageStore;
     if (_isSending || messageStore == null) return;
-    _autonomyContextRevision++;
     try {
       await messageStore.activateMessageBranch(messageId);
       await _refreshActivePath(messageStore);
+      if (_searchResultsMessageId != null && mounted) {
+        setState(() => _searchResultsMessageId = null);
+      }
+      final replyService = _replyService;
+      if (replyService is GeminiReplyService) {
+        replyService.scheduleActiveBranchTopicBackfill();
+      }
     } catch (error) {
       if (mounted) {
-        _showMessage(appText(
-          'Could not switch conversation branch: {error}',
-          values: {'error': error},
-        ));
+        _showMessage(
+          appText(
+            'Could not switch conversation branch: {error}',
+            values: {'error': error},
+          ),
+        );
       }
     }
   }
 
+  Future<void> _openSearchResultLink(String href) async {
+    final uri = Uri.tryParse(href);
+    if (uri == null ||
+        (uri.scheme != 'https' && uri.scheme != 'http') ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty) {
+      return;
+    }
+    try {
+      final result = await Process.run('xdg-open', [uri.toString()]);
+      if (result.exitCode != 0) {
+        throw ProcessException(
+          'xdg-open',
+          [uri.toString()],
+          result.stderr.toString(),
+          result.exitCode,
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      _showMessage(
+        appText('Could not open link: {error}', values: {'error': error}),
+      );
+    }
+  }
+
   Future<void> _regenerateMessage(String responseMessageId) async {
+    await _waitForProactiveAppend();
     if (_isSending) return;
-    _clearResponseHandoff();
-    _autonomyContextRevision++;
-    final responseIndex =
-        _messages.indexWhere((message) => message.id == responseMessageId);
+    final responseIndex = _messages.indexWhere(
+      (message) => message.id == responseMessageId,
+    );
     if (responseIndex <= 0 ||
         _messages[responseIndex].role != 'model' ||
         _messages[responseIndex - 1].role != 'user') {
@@ -1837,10 +1766,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         });
       }
       if (mounted) {
-        _showMessage(appText(
-          'Could not load previous branch replies: {error}',
-          values: {'error': error},
-        ));
+        _showMessage(
+          appText(
+            'Could not load previous branch replies: {error}',
+            values: {'error': error},
+          ),
+        );
       }
       return;
     }
@@ -1876,10 +1807,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       });
     } catch (error) {
       if (!mounted) return;
-      _showMessage(appText(
-        'Could not save response feedback: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Could not save response feedback: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
@@ -1906,10 +1839,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       });
     } catch (error) {
       if (!mounted) return;
-      _showMessage(appText(
-        'Could not save response reaction: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Could not save response reaction: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
@@ -1920,10 +1855,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     bool isRegenerate = false,
     List<ChatMessage> previousBranchReplies = const [],
   }) async {
-    _clearResponseHandoff();
-    final autonomyThought = _latestAutonomyThought;
+    _followLatestDuringStreaming = true;
+    if (replyService is GeminiReplyService) {
+      replyService.recordConversationUserActivity(
+        allowProactive: _proactiveModeAllows,
+      );
+    }
     final responseMessageId = _uuid.v4();
-    SaraResponseHandoff? pendingResponseHandoff;
     if (mounted) {
       setState(() => _activeReplyResponseMessageId = responseMessageId);
     }
@@ -1950,7 +1888,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           streamedMessage = ChatMessage(
             id: streamedMessage!.id,
             role: 'model',
-            type: streamedMessage!.type,
             content: content,
             timestamp: streamedMessage!.timestamp,
             createdAtUtc: streamedMessage!.createdAtUtc,
@@ -1962,7 +1899,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           if (index >= 0) _messages[index] = streamedMessage!;
         }
       });
-      _scrollToLatest();
+      _scrollToLatestDuringStreaming();
     }
 
     void receiveStreamedText(String text) {
@@ -1984,26 +1921,25 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         return;
       }
       pendingRunes = text.runes.toList(growable: false);
-      typewriterTimer ??= Timer.periodic(
-        const Duration(milliseconds: 45),
-        (timer) {
-          if (!mounted) {
-            timer.cancel();
-            typewriterTimer = null;
-            return;
-          }
-          final start = visibleRunes.length;
-          final end = math.min(start + 2, pendingRunes.length);
-          if (end > start) {
-            visibleRunes.addAll(pendingRunes.getRange(start, end));
-            updateStreamedMessage(String.fromCharCodes(visibleRunes));
-          }
-          if (visibleRunes.length >= pendingRunes.length) {
-            timer.cancel();
-            typewriterTimer = null;
-          }
-        },
-      );
+      typewriterTimer ??= Timer.periodic(const Duration(milliseconds: 60), (
+        timer,
+      ) {
+        if (!mounted) {
+          timer.cancel();
+          typewriterTimer = null;
+          return;
+        }
+        final start = visibleRunes.length;
+        final end = math.min(start + 5, pendingRunes.length);
+        if (end > start) {
+          visibleRunes.addAll(pendingRunes.getRange(start, end));
+          updateStreamedMessage(String.fromCharCodes(visibleRunes));
+        }
+        if (visibleRunes.length >= pendingRunes.length) {
+          timer.cancel();
+          typewriterTimer = null;
+        }
+      });
     }
 
     void finishTypewriter() {
@@ -2021,8 +1957,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     try {
       final personalName = await messageStore.readPersonalName();
       final persistedHistory = await messageStore.loadActiveMessages();
-      final userIndex = persistedHistory
-          .indexWhere((message) => message.id == userMessage.id);
+      final userIndex = persistedHistory.indexWhere(
+        (message) => message.id == userMessage.id,
+      );
       final history = List<ChatMessage>.unmodifiable(
         userIndex < 0
             ? [...persistedHistory, userMessage]
@@ -2036,52 +1973,55 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       final reply = await replyService.generateReply(
         history,
         personalName: personalName,
-        autonomyThought: autonomyThought,
         responseMessageId: responseMessageId,
         previousBranchReplies: previousBranchReplies,
-        thinkingEnabled: true,
         attachmentsByMessage: historyAttachments,
-        onText: receiveStreamedText,
-        onMedia: (attachments) => generatedAttachments = attachments,
-        onResponseHandoff:
-            _autonomyEnabled && replyService is SaraAutonomousService
-                ? (handoff) {
-                    pendingResponseHandoff = SaraResponseHandoff(
-                      userIntent: handoff.userIntent,
-                      responseApproach: handoff.responseApproach,
-                      openThread: handoff.openThread,
-                      sourceMessageIds: [userMessage.id, responseMessageId],
-                    );
-                  }
-                : null,
         onMemoryError: (error) {
           if (mounted) {
             _showMessage(
               appText(
-                'Could not save conversation memory: {error}',
+                'Could not retrieve conversation memory: {error}',
                 values: {'error': error},
               ),
             );
           }
         },
-        onInnerLifeError: (error) {
-          if (mounted) {
-            _showMessage(
-              appText(
-                'Could not save Sara’s inner-life state: {error}',
-                values: {'error': error},
-              ),
-            );
-          }
-        },
+        onText: receiveStreamedText,
+        onMedia: (attachments) => generatedAttachments = attachments,
         captureCameraFrame: _cameraToolAvailable ? _captureFrameForSara : null,
         approveTerminalCommand: _requestTerminalCommandApproval,
         executeTerminalCommand: _executeTerminalCommand,
-        onTerminalCommandActivity: _updateTerminalCommandActivity,
-        onTerminalCommandResult: _recordTerminalCommandResult,
+        onTerminalCommandActivity:
+            (request, {required running, required automaticallyAllowed}) =>
+                _updateTerminalCommandActivity(
+                  request,
+                  ownerMessageId: userMessage.id,
+                  running: running,
+                  automaticallyAllowed: automaticallyAllowed,
+                ),
+        onTerminalCommandResult: (result) =>
+            _recordTerminalCommandResult(result, userMessage.id),
       );
       finishTypewriter();
       if (reply.trim().isEmpty && generatedAttachments.isEmpty) {
+        if (replyService is GeminiReplyService) {
+          try {
+            await replyService.saveConversationMemory(
+              responseMessageId: responseMessageId,
+              userMessage: userMessage,
+              modelMessage: null,
+            );
+          } catch (error) {
+            if (mounted) {
+              _showMessage(
+                appText(
+                  'Could not save conversation memory: {error}',
+                  values: {'error': error},
+                ),
+              );
+            }
+          }
+        }
         if (mounted) {
           setState(() {
             if (_retryErrors.containsKey(userMessage.id)) {
@@ -2108,45 +2048,62 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           : ChatMessage(
               id: streamedMessage!.id,
               role: 'model',
-              type: streamedMessage!.type,
               content: reply,
               timestamp: streamedMessage!.timestamp,
               createdAtUtc: streamedMessage!.createdAtUtc,
               parentMessageId: userMessage.id,
             );
+      final terminalActivities =
+          _terminalActivitiesByResponse[responseMessageId] ??
+          _terminalActivitiesByResponse[userMessage.id] ??
+          userMessage.terminalActivities;
+      final savedModelMessage = modelMessage.withTerminalActivities(
+        terminalActivities,
+      );
+      final savedUserMessage = userMessage.withTerminalActivities(
+        terminalActivities,
+      );
       if (!mounted) return;
       setState(() {
         if (streamedMessage == null) {
-          _messages.add(modelMessage);
+          _messages.add(savedModelMessage);
         } else {
           final index = _messages.indexWhere(
-            (message) => message.id == modelMessage.id,
+            (message) => message.id == savedModelMessage.id,
           );
-          if (index >= 0) _messages[index] = modelMessage;
+          if (index >= 0) _messages[index] = savedModelMessage;
+        }
+        if (terminalActivities.isNotEmpty) {
+          _terminalActivitiesByResponse.remove(userMessage.id);
+          _terminalActivitiesByResponse[responseMessageId] = terminalActivities;
         }
         if (generatedAttachments.isNotEmpty) {
-          _attachmentsByMessage[modelMessage.id] = generatedAttachments;
+          _attachmentsByMessage[savedModelMessage.id] = generatedAttachments;
         }
       });
-      unawaited(_notifyWhenUnavailable(
-        modelMessage.content.trim().isEmpty
-            ? appText('Sara shared something with you.')
-            : modelMessage.content.trim(),
-        title: appText('Sara sent you a message'),
-      ));
+      unawaited(_playNotificationSound('assets/sound/received.mp3'));
+      unawaited(
+        _notifyWhenUnavailable(
+          savedModelMessage.content.trim().isEmpty
+              ? appText('Sara shared something with you.')
+              : savedModelMessage.content.trim(),
+          title: appText('Sara sent you a message'),
+        ),
+      );
       try {
         await messageStore.saveExchangeWithAttachments(
-          [userMessage, modelMessage],
+          [savedUserMessage, savedModelMessage],
           userMessage.id,
           _attachmentsByMessage[userMessage.id] ?? const [],
           additionalAttachments: {
             if (generatedAttachments.isNotEmpty)
-              modelMessage.id: generatedAttachments,
+              savedModelMessage.id: generatedAttachments,
           },
         );
-        if (pendingResponseHandoff != null) {
-          _latestResponseHandoff = _TemporaryResponseHandoff(
-            handoff: pendingResponseHandoff!,
+        if (terminalActivities.isNotEmpty) {
+          await messageStore.moveTerminalCommandActivities(
+            userMessage.id,
+            responseMessageId,
           );
         }
         await _refreshActivePath(messageStore);
@@ -2158,7 +2115,28 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           _isSending = false;
           _clearRegenerationState();
         });
+        if (replyService is GeminiReplyService) {
+          try {
+            await replyService.saveConversationMemory(
+              responseMessageId: responseMessageId,
+              userMessage: savedUserMessage,
+              modelMessage: savedModelMessage,
+            );
+          } catch (error) {
+            if (mounted) {
+              _showMessage(
+                appText(
+                  'Could not save conversation memory: {error}',
+                  values: {'error': error},
+                ),
+              );
+            }
+          }
+        }
       } catch (error) {
+        if (replyService is GeminiReplyService) {
+          replyService.discardConversationMemoryContext(responseMessageId);
+        }
         if (isRegenerate) {
           final activeMessages = await messageStore.loadActiveMessages();
           if (mounted) {
@@ -2166,7 +2144,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
               _messages
                 ..clear()
                 ..addAll(activeMessages)
-                ..add(modelMessage);
+                ..add(savedModelMessage);
             });
           }
         }
@@ -2185,9 +2163,18 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       _scrollToLatest();
     } catch (error) {
       typewriterTimer?.cancel();
+      if (replyService is GeminiReplyService) {
+        replyService.discardConversationMemoryContext(responseMessageId);
+      }
       String? cleanupError;
       try {
-        if (!isRegenerate) await messageStore.deleteMessage(userMessage.id);
+        final hasCommandActivities =
+            _terminalActivitiesByResponse[responseMessageId]?.isNotEmpty ??
+            _terminalActivitiesByResponse[userMessage.id]?.isNotEmpty ??
+            false;
+        if (!isRegenerate && !hasCommandActivities) {
+          await messageStore.deleteMessage(userMessage.id);
+        }
       } catch (deleteError) {
         cleanupError = deleteError.toString();
       }
@@ -2208,17 +2195,19 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
         _isSending = false;
       });
-      _showMessage(isRegenerate
-          ? appText('Regeneration failed: {error}', values: {'error': error})
-          : cleanupError == null
-              ? appText(
-                  'AI request failed: {error}. Tap retry beside the message to try again.',
-                  values: {'error': error},
-                )
-              : appText(
-                  'Request failed: {error}. The SQL message was not removed: {cleanupError}',
-                  values: {'error': error, 'cleanupError': cleanupError},
-                ));
+      _showMessage(
+        isRegenerate
+            ? appText('Regeneration failed: {error}', values: {'error': error})
+            : cleanupError == null
+            ? appText(
+                'AI request failed: {error}. Tap retry beside the message to try again.',
+                values: {'error': error},
+              )
+            : appText(
+                'Request failed: {error}. The SQL message was not removed: {cleanupError}',
+                values: {'error': error, 'cleanupError': cleanupError},
+              ),
+      );
     } finally {
       if (mounted && _activeReplyResponseMessageId == responseMessageId) {
         setState(() => _activeReplyResponseMessageId = null);
@@ -2242,7 +2231,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     return ChatMessage(
       id: id ?? _uuid.v4(),
       role: role,
-      type: 'text',
       content: content,
       timestamp: formatJakartaTimestamp(createdAtUtc),
       createdAtUtc: createdAtUtc,
@@ -2255,20 +2243,31 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       if (!mounted || !_scrollController.hasClients) return;
       _scrollController
           .animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 280),
-        curve: Curves.easeOut,
-      )
+            _scrollController.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 280),
+            curve: Curves.easeOut,
+          )
           .whenComplete(() {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || !_scrollController.hasClients) return;
-          final position = _scrollController.position;
-          if (position.extentAfter > 1) {
-            _scrollController.jumpTo(position.maxScrollExtent);
-          }
-          _handleScroll();
-        });
-      });
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted || !_scrollController.hasClients) return;
+              final position = _scrollController.position;
+              if (position.extentAfter > 1) {
+                _scrollController.jumpTo(position.maxScrollExtent);
+              }
+              _handleScroll();
+            });
+          });
+    });
+  }
+
+  void _scrollToLatestDuringStreaming() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final position = _scrollController.position;
+      if (_followLatestDuringStreaming && position.extentAfter > 1) {
+        _scrollController.jumpTo(position.maxScrollExtent);
+      }
+      _handleScroll();
     });
   }
 
@@ -2302,6 +2301,11 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
   }
 
+  void _handleUserScroll() {
+    if (!_scrollController.hasClients) return;
+    _followLatestDuringStreaming = _scrollController.position.extentAfter <= 80;
+  }
+
   Future<void> _notifyWhenUnavailable(
     String message, {
     required String title,
@@ -2315,25 +2319,19 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
   void _showMessage(String message, {bool isError = true}) {
     if (isError) {
-      unawaited(_notifyWhenUnavailable(
-        message,
-        title: appText('Sara desktop app'),
-      ));
+      unawaited(
+        _notifyWhenUnavailable(message, title: appText('Sara desktop app')),
+      );
     }
-    _showToast(
-      context,
-      message,
-      isError: isError,
-      notifyDesktop: false,
-    );
+    _showToast(context, message, isError: isError, notifyDesktop: false);
   }
 
   Future<void> _openSettings() async {
     final messageStore = _messageStore;
     if (messageStore == null) {
-      _showMessage(appText(
-        'Local chat storage is not ready. Please try again shortly.',
-      ));
+      _showMessage(
+        appText('Local chat storage is not ready. Please try again shortly.'),
+      );
       return;
     }
     _chatRoomVisible = false;
@@ -2347,16 +2345,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           onExportBackup: _exportBackup,
           onImportBackup: _importBackup,
           isSending: _isSending,
-          autonomyEnabled: _autonomyEnabled,
-          onAutonomyChanged: _setAutonomyEnabled,
-          autonomousCameraEnabled: _autonomousCameraEnabled,
-          onAutonomousCameraChanged: _setAutonomousCameraEnabled,
+          cameraEnabled: _cameraEnabled,
+          onCameraChanged: _setCameraEnabled,
           saraCameraActive: _saraCameraActiveListenable,
-          onStopSaraCamera: _stopAutonomousCameraFromIndicator,
-          onErrorNotification: (message) => unawaited(_notifyWhenUnavailable(
-            message,
-            title: appText('Sara desktop app'),
-          )),
+          onStopSaraCamera: _stopCameraFromIndicator,
+          onErrorNotification: (message) => unawaited(
+            _notifyWhenUnavailable(message, title: appText('Sara desktop app')),
+          ),
         ),
       );
     } finally {
@@ -2366,16 +2361,16 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
   Future<void> _exportBackup() async {
     if (_isSending) {
-      _showMessage(appText(
-        'Wait for Sara to finish replying before exporting a backup.',
-      ));
+      _showMessage(
+        appText('Wait for Sara to finish replying before exporting a backup.'),
+      );
       return;
     }
     final messageStore = _messageStore;
     if (messageStore == null) {
-      _showMessage(appText(
-        'Local chat storage is not ready. Please try again shortly.',
-      ));
+      _showMessage(
+        appText('Local chat storage is not ready. Please try again shortly.'),
+      );
       return;
     }
     try {
@@ -2391,26 +2386,25 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       }
     } catch (error) {
       if (mounted) {
-        _showMessage(appText(
-          'Could not export backup: {error}',
-          values: {'error': error},
-        ));
+        _showMessage(
+          appText('Could not export backup: {error}', values: {'error': error}),
+        );
       }
     }
   }
 
   Future<void> _importBackup() async {
     if (_isSending) {
-      _showMessage(appText(
-        'Wait for Sara to finish replying before importing a backup.',
-      ));
+      _showMessage(
+        appText('Wait for Sara to finish replying before importing a backup.'),
+      );
       return;
     }
     final messageStore = _messageStore;
     if (messageStore == null) {
-      _showMessage(appText(
-        'Local chat storage is not ready. Please try again shortly.',
-      ));
+      _showMessage(
+        appText('Local chat storage is not ready. Please try again shortly.'),
+      );
       return;
     }
     var backupRestored = false;
@@ -2439,8 +2433,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       );
       if (shouldImport != true || !mounted) return;
 
-      _clearResponseHandoff();
-      _autonomyContextRevision++;
       final restoreResult = await SaraBackupService().restoreBackup(
         messageStore,
         Uint8List.fromList(backupBytes),
@@ -2473,35 +2465,39 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       if (history.isNotEmpty) _scrollToInitialLatest();
       _showMessage(appText('Backup imported successfully.'), isError: false);
       if (restoreResult.cleanupErrors.isNotEmpty) {
-        _showMessage(appText(
-          'Attachment cleanup failed after backup import: {error}',
-          values: {'error': restoreResult.cleanupErrors.join('\n')},
-        ));
+        _showMessage(
+          appText(
+            'Attachment cleanup failed after backup import: {error}',
+            values: {'error': restoreResult.cleanupErrors.join('\n')},
+          ),
+        );
       }
     } catch (error) {
       if (mounted) {
-        _showMessage(appText(
-          backupRestored
-              ? 'Backup was imported, but chat could not be refreshed: {error}'
-              : 'Could not import backup: {error}',
-          values: {'error': error},
-        ));
+        _showMessage(
+          appText(
+            backupRestored
+                ? 'Backup was imported, but chat could not be refreshed: {error}'
+                : 'Could not import backup: {error}',
+            values: {'error': error},
+          ),
+        );
       }
     }
   }
 
   Future<void> _clearChat() async {
     if (_isSending) {
-      _showMessage(appText(
-        'Wait for Sara to finish replying before clearing the chat.',
-      ));
+      _showMessage(
+        appText('Wait for Sara to finish replying before clearing the chat.'),
+      );
       return;
     }
     final messageStore = _messageStore;
     if (messageStore == null) {
-      _showMessage(appText(
-        'Local chat storage is not ready. Please try again shortly.',
-      ));
+      _showMessage(
+        appText('Local chat storage is not ready. Please try again shortly.'),
+      );
       return;
     }
     final clipboardAttachments = _attachmentsByMessage.values
@@ -2512,15 +2508,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       await messageStore.clearMessages();
     } catch (error) {
       if (!mounted) return;
-      _showMessage(appText(
-        'Could not delete chat: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText('Could not delete chat: {error}', values: {'error': error}),
+      );
       return;
     }
 
-    _clearResponseHandoff();
-    _autonomyContextRevision++;
     if (mounted) {
       setState(() {
         _messages.clear();
@@ -2541,10 +2534,12 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       }
     } catch (error) {
       if (!mounted) return;
-      _showMessage(appText(
-        'Chat cleared, but copied attachment cleanup failed: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Chat cleared, but copied attachment cleanup failed: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
@@ -2559,15 +2554,21 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
     final supportDirectory = await getApplicationSupportDirectory();
     final cacheDirectory = await getApplicationCacheDirectory();
-    final clipboardDirectory = path.normalize(path.absolute(
-      path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
-    ));
-    final cameraDirectory = path.normalize(path.absolute(
-      path.join(cacheDirectory.path, 'Sara', 'camera-attachments'),
-    ));
-    final legacyCameraDirectory = path.normalize(path.absolute(
-      path.join(supportDirectory.path, 'Sara', 'camera-attachments'),
-    ));
+    final clipboardDirectory = path.normalize(
+      path.absolute(
+        path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
+      ),
+    );
+    final cameraDirectory = path.normalize(
+      path.absolute(
+        path.join(cacheDirectory.path, 'Sara', 'camera-attachments'),
+      ),
+    );
+    final legacyCameraDirectory = path.normalize(
+      path.absolute(
+        path.join(supportDirectory.path, 'Sara', 'camera-attachments'),
+      ),
+    );
     final failures = <String>[];
     for (final filePath in paths) {
       final absoluteFilePath = path.normalize(path.absolute(filePath));
@@ -2593,7 +2594,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final showInlineSettings = MediaQuery.sizeOf(context).width < 680;
     var visibleMessages = _messages;
     final regeneratingUserId = _regeneratingUserMessageId;
     if (regeneratingUserId != null) {
@@ -2615,9 +2615,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         (_terminalActivitiesByResponse[activeResponseId]?.isNotEmpty ??
             false)) {
       final parent = visibleMessages.reversed.cast<ChatMessage?>().firstWhere(
-            (message) => message?.role == 'user',
-            orElse: () => null,
-          );
+        (message) => message?.role == 'user',
+        orElse: () => null,
+      );
       if (parent != null) {
         final createdAtUtc = DateTime.now().toUtc().millisecondsSinceEpoch;
         visibleMessages = [
@@ -2625,7 +2625,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           ChatMessage(
             id: activeResponseId,
             role: 'model',
-            type: 'text',
             content: '',
             timestamp: formatJakartaTimestamp(createdAtUtc),
             createdAtUtc: createdAtUtc,
@@ -2634,6 +2633,22 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
         ];
       }
     }
+    ChatMessage? selectedSearchMessage;
+    for (final message in visibleMessages) {
+      if (message.id == _searchResultsMessageId) {
+        selectedSearchMessage = message;
+        break;
+      }
+    }
+    final selectedSearchSources = selectedSearchMessage == null
+        ? const <_SearchResultSource>[]
+        : _messageResultSources(selectedSearchMessage.content);
+    final showSearchResultsPanel = selectedSearchSources.length >= 2;
+    final selectedSearchDate = selectedSearchMessage == null
+        ? ''
+        : _searchResultDate(selectedSearchMessage.createdAtUtc);
+    final showInlineSettings =
+        MediaQuery.sizeOf(context).width < 680 && !showSearchResultsPanel;
     return Scaffold(
       backgroundColor: _canvas,
       body: SafeArea(
@@ -2655,57 +2670,6 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                   color: _canvas,
                   child: Stack(
                     children: [
-                      Positioned.fill(
-                        child: _isLoadingHistory
-                            ? const Center(child: CircularProgressIndicator())
-                            : visibleMessages.isEmpty
-                                ? const _WelcomeView()
-                                : ListenableBuilder(
-                                    listenable: Listenable.merge([
-                                      _speechPlaybackController
-                                          .speakingMessageId,
-                                      _speechPlaybackController
-                                          .loadingMessageId,
-                                    ]),
-                                    builder: (context, _) => _ConversationView(
-                                      messages: visibleMessages,
-                                      scrollController: _scrollController,
-                                      isSending: _isSending,
-                                      showReplyIndicator:
-                                          _isSending && !_hasStreamedReply,
-                                      retryErrors: _retryErrors,
-                                      onRetryMessage: _retryMessage,
-                                      onDeleteMessage:
-                                          _deleteMessageAndFollowing,
-                                      onEditMessage: _submitEditedMessage,
-                                      messageBranches: _messageBranches,
-                                      onActivateBranch: _activateMessageBranch,
-                                      onRegenerateMessage: _regenerateMessage,
-                                      attachmentsByMessage:
-                                          _attachmentsByMessage,
-                                      terminalActivitiesByResponse:
-                                          _terminalActivitiesByResponse,
-                                      activeReplyResponseMessageId:
-                                          _activeReplyResponseMessageId,
-                                      assistantFeedback: _assistantFeedback,
-                                      onSetAssistantFeedback:
-                                          _setAssistantFeedback,
-                                      assistantReactions: _assistantReactions,
-                                      onSetAssistantReaction:
-                                          _setAssistantReaction,
-                                      speakingMessageId:
-                                          _speechPlaybackController
-                                              .speakingMessageId.value,
-                                      loadingSpeechMessageId:
-                                          _speechPlaybackController
-                                              .loadingMessageId.value,
-                                      onToggleSpeech: _toggleSpeech,
-                                      showScrollToBottom: _showScrollToBottom,
-                                      onScrollToBottom: _scrollToLatest,
-                                      onScrollMetricsChanged: _handleScroll,
-                                    ),
-                                  ),
-                      ),
                       Positioned(
                         left: 0,
                         right: 0,
@@ -2718,36 +2682,165 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                           ),
                         ),
                       ),
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: _Composer(
-                          key: _composerKey,
-                          controller: _messageController,
-                          focusNode: _messageFocus,
-                          onSend: _sendMessage,
-                          isWaitingForReply: _isSending && !_hasStreamedReply,
-                          showInlineSettings: showInlineSettings,
-                          onOpenSettings: _openSettings,
-                          clipboardImageReader: widget.clipboardImageReader,
-                          clipboardImageSaver: widget.clipboardImageSaver,
-                          cameraSessionFactory: widget.cameraSessionFactory,
-                          cameraImageSaver: widget.cameraImageSaver,
-                          pendingTerminalCommandApproval:
-                              _pendingTerminalCommandApproval,
-                          terminalCommandActivity: _terminalCommandActivity,
-                          terminalCommandOutput: [
-                            if (_terminalCommandStdout.isNotEmpty)
-                              _terminalCommandStdout,
-                            if (_terminalCommandStderr.isNotEmpty)
-                              'stderr:\n$_terminalCommandStderr',
-                          ].join('\n'),
-                          terminalCommandRunning: _terminalCommandRunning,
-                          terminalCommandAutomaticallyAllowed:
-                              _terminalCommandAutomaticallyAllowed,
-                          onTerminalCommandDecision: _decideTerminalCommand,
-                          onStopTerminalCommand: _stopTerminalCommand,
+                      Positioned.fill(
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            final panelWidth = constraints.maxWidth < 800
+                                ? constraints.maxWidth * 0.42
+                                : 390.0;
+                            return Row(
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    children: [
+                                      Expanded(
+                                        child: _isLoadingHistory
+                                            ? const Center(
+                                                child:
+                                                    CircularProgressIndicator(),
+                                              )
+                                            : visibleMessages.isEmpty
+                                            ? const _WelcomeView()
+                                            : ListenableBuilder(
+                                                listenable: Listenable.merge([
+                                                  _speechPlaybackController
+                                                      .speakingMessageId,
+                                                  _speechPlaybackController
+                                                      .loadingMessageId,
+                                                ]),
+                                                builder: (context, _) => _ConversationView(
+                                                  messages: visibleMessages,
+                                                  scrollController:
+                                                      _scrollController,
+                                                  isSending: _isSending,
+                                                  showReplyIndicator:
+                                                      _isSending &&
+                                                      !_hasStreamedReply,
+                                                  retryErrors: _retryErrors,
+                                                  onRetryMessage: _retryMessage,
+                                                  onDeleteMessage:
+                                                      _deleteMessageAndFollowing,
+                                                  onEditMessage:
+                                                      _submitEditedMessage,
+                                                  onProactiveModeChanged:
+                                                      _recordConversationProactiveMode,
+                                                  messageBranches:
+                                                      _messageBranches,
+                                                  onActivateBranch:
+                                                      _activateMessageBranch,
+                                                  onRegenerateMessage:
+                                                      _regenerateMessage,
+                                                  attachmentsByMessage:
+                                                      _attachmentsByMessage,
+                                                  terminalActivitiesByResponse:
+                                                      _terminalActivitiesByResponse,
+                                                  activeReplyResponseMessageId:
+                                                      _activeReplyResponseMessageId,
+                                                  assistantFeedback:
+                                                      _assistantFeedback,
+                                                  onSetAssistantFeedback:
+                                                      _setAssistantFeedback,
+                                                  assistantReactions:
+                                                      _assistantReactions,
+                                                  onSetAssistantReaction:
+                                                      _setAssistantReaction,
+                                                  speakingMessageId:
+                                                      _speechPlaybackController
+                                                          .speakingMessageId
+                                                          .value,
+                                                  loadingSpeechMessageId:
+                                                      _speechPlaybackController
+                                                          .loadingMessageId
+                                                          .value,
+                                                  onToggleSpeech: _toggleSpeech,
+                                                  showScrollToBottom:
+                                                      _showScrollToBottom,
+                                                  onScrollToBottom:
+                                                      _scrollToLatest,
+                                                  onScrollMetricsChanged:
+                                                      _handleScroll,
+                                                  onUserScroll:
+                                                      _handleUserScroll,
+                                                  onShowSearchResults:
+                                                      (
+                                                        messageId,
+                                                      ) => setState(() {
+                                                        _searchResultsMessageId =
+                                                            messageId;
+                                                      }),
+                                                ),
+                                              ),
+                                      ),
+                                      ConstrainedBox(
+                                        constraints: BoxConstraints(
+                                          maxHeight: constraints.maxHeight,
+                                        ),
+                                        child: _Composer(
+                                          key: _composerKey,
+                                          controller: _messageController,
+                                          focusNode: _messageFocus,
+                                          onSend: _sendMessage,
+                                          onModeChanged:
+                                              _recordConversationProactiveMode,
+                                          isWaitingForReply:
+                                              _isSending && !_hasStreamedReply,
+                                          showInlineSettings:
+                                              showInlineSettings,
+                                          onOpenSettings: _openSettings,
+                                          clipboardImageReader:
+                                              widget.clipboardImageReader,
+                                          clipboardImageSaver:
+                                              widget.clipboardImageSaver,
+                                          cameraSessionFactory:
+                                              widget.cameraSessionFactory,
+                                          cameraImageSaver:
+                                              widget.cameraImageSaver,
+                                          pendingTerminalCommandApproval:
+                                              _pendingTerminalCommandApproval,
+                                          terminalCommandActivity:
+                                              _terminalCommandActivity,
+                                          terminalCommandOutput: [
+                                            if (_terminalCommandStdout
+                                                .isNotEmpty)
+                                              _terminalCommandStdout,
+                                            if (_terminalCommandStderr
+                                                .isNotEmpty)
+                                              'stderr:\n$_terminalCommandStderr',
+                                          ].join('\n'),
+                                          terminalCommandRunning:
+                                              _terminalCommandRunning,
+                                          terminalCommandAutomaticallyAllowed:
+                                              _terminalCommandAutomaticallyAllowed,
+                                          onTerminalCommandDecision:
+                                              _decideTerminalCommand,
+                                          onStopTerminalCommand:
+                                              _stopTerminalCommand,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                AnimatedContainer(
+                                  duration: const Duration(milliseconds: 220),
+                                  curve: Curves.easeInOut,
+                                  width: showSearchResultsPanel
+                                      ? panelWidth
+                                      : 0,
+                                  child: showSearchResultsPanel
+                                      ? _SearchResultsPanel(
+                                          sources: selectedSearchSources,
+                                          messageDate: selectedSearchDate,
+                                          onClose: () => setState(
+                                            () =>
+                                                _searchResultsMessageId = null,
+                                          ),
+                                          onOpen: _openSearchResultLink,
+                                        )
+                                      : const SizedBox.shrink(),
+                                ),
+                              ],
+                            );
+                          },
                         ),
                       ),
                       if (!showInlineSettings)
@@ -2774,12 +2867,15 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                           child: Center(
                             child: Material(
                               key: const ValueKey(
-                                  'sara-camera-active-indicator'),
+                                'sara-camera-active-indicator',
+                              ),
                               color: const Color(0xF02B303A),
                               borderRadius: BorderRadius.circular(20),
                               child: Padding(
-                                padding:
-                                    const EdgeInsets.only(left: 12, right: 4),
+                                padding: const EdgeInsets.only(
+                                  left: 12,
+                                  right: 4,
+                                ),
                                 child: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
@@ -2791,7 +2887,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                     const SizedBox(width: 7),
                                     Text(
                                       appText(
-                                          'Sara is looking through the camera'),
+                                        'Sara is looking through the camera',
+                                      ),
                                       style: const TextStyle(
                                         color: _text,
                                         fontSize: 11,
@@ -2802,17 +2899,16 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                     IconButton(
                                       key: const ValueKey('stop-sara-camera'),
                                       tooltip: appText('Stop camera access'),
-                                      onPressed:
-                                          _stopAutonomousCameraFromIndicator,
+                                      onPressed: _stopCameraFromIndicator,
                                       icon: const Icon(LucideIcons300.x),
                                       color: _muted,
                                       iconSize: 16,
                                       visualDensity: VisualDensity.compact,
                                       constraints:
                                           const BoxConstraints.tightFor(
-                                        width: 28,
-                                        height: 28,
-                                      ),
+                                            width: 28,
+                                            height: 28,
+                                          ),
                                       padding: EdgeInsets.zero,
                                     ),
                                   ],
@@ -2835,8 +2931,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                 child: DecoratedBox(
                                   decoration: BoxDecoration(
                                     color: _surfaceRaised,
-                                    borderRadius:
-                                        BorderRadius.all(Radius.circular(14)),
+                                    borderRadius: BorderRadius.all(
+                                      Radius.circular(14),
+                                    ),
                                   ),
                                   child: Padding(
                                     padding: const EdgeInsets.symmetric(
@@ -2846,12 +2943,15 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        const Icon(LucideIcons300.upload,
-                                            color: _accent),
+                                        const Icon(
+                                          LucideIcons300.upload,
+                                          color: _accent,
+                                        ),
                                         const SizedBox(width: 10),
                                         Text(
                                           appText(
-                                              'Drop files or media here to attach'),
+                                            'Drop files or media here to attach',
+                                          ),
                                           style: const TextStyle(
                                             color: _text,
                                             fontSize: 13,
@@ -2907,13 +3007,15 @@ class _LinuxWindowTitleBarState extends State<_LinuxWindowTitleBar> {
   }
 
   void _startDragging(DragStartDetails details) {
-    unawaited(_runWindowAction(
-      'startDragging',
-      arguments: {
-        'x': details.globalPosition.dx.round(),
-        'y': details.globalPosition.dy.round(),
-      },
-    ));
+    unawaited(
+      _runWindowAction(
+        'startDragging',
+        arguments: {
+          'x': details.globalPosition.dx.round(),
+          'y': details.globalPosition.dy.round(),
+        },
+      ),
+    );
   }
 
   @override
@@ -3036,7 +3138,10 @@ class _LinuxWindowControlState extends State<_LinuxWindowControl> {
               child: CustomPaint(
                 key: ValueKey('window-control-icon-${widget.icon.name}'),
                 size: const Size.square(14),
-                painter: _WindowControlPainter(widget.icon),
+                painter: _WindowControlPainter(
+                  widget.icon,
+                  _hovered ? widget.hoverColor : const Color(0xFF24262A),
+                ),
               ),
             ),
           ),
@@ -3047,9 +3152,10 @@ class _LinuxWindowControlState extends State<_LinuxWindowControl> {
 }
 
 class _WindowControlPainter extends CustomPainter {
-  const _WindowControlPainter(this.icon);
+  const _WindowControlPainter(this.icon, this.backgroundColor);
 
   final _WindowControlIcon icon;
+  final Color backgroundColor;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -3058,7 +3164,6 @@ class _WindowControlPainter extends CustomPainter {
       ..strokeWidth = 1.5
       ..strokeCap = StrokeCap.square
       ..style = PaintingStyle.stroke;
-    final bounds = Rect.fromLTWH(2, 2, size.width - 4, size.height - 4);
 
     switch (icon) {
       case _WindowControlIcon.minimize:
@@ -3068,21 +3173,31 @@ class _WindowControlPainter extends CustomPainter {
           paint,
         );
       case _WindowControlIcon.maximize:
-        canvas.drawRect(bounds, paint);
+        final path = Path()
+          ..moveTo(5, 2.5)
+          ..lineTo(2.5, 2.5)
+          ..lineTo(2.5, 5)
+          ..moveTo(size.width - 5, 2.5)
+          ..lineTo(size.width - 2.5, 2.5)
+          ..lineTo(size.width - 2.5, 5)
+          ..moveTo(2.5, size.height - 5)
+          ..lineTo(2.5, size.height - 2.5)
+          ..lineTo(5, size.height - 2.5)
+          ..moveTo(size.width - 5, size.height - 2.5)
+          ..lineTo(size.width - 2.5, size.height - 2.5)
+          ..lineTo(size.width - 2.5, size.height - 5);
+        canvas.drawPath(path, paint);
       case _WindowControlIcon.restore:
-        final rear = Rect.fromLTWH(4, 2, 8, 8);
-        final front = Rect.fromLTWH(2, 4, 8, 8);
+        final rear = Rect.fromLTWH(5, 2, 7, 7);
+        final front = Rect.fromLTWH(2, 5, 8, 8);
         canvas.drawRect(rear, paint);
-        canvas.drawLine(
-          Offset(front.left, front.top + 2),
-          Offset(front.left, front.bottom),
-          paint,
+        canvas.drawRect(
+          front,
+          Paint()
+            ..color = backgroundColor
+            ..style = PaintingStyle.fill,
         );
-        canvas.drawLine(
-          Offset(front.left, front.bottom),
-          Offset(front.right, front.bottom),
-          paint,
-        );
+        canvas.drawRect(front, paint);
       case _WindowControlIcon.close:
         canvas.drawLine(
           const Offset(3, 3),
@@ -3099,7 +3214,8 @@ class _WindowControlPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_WindowControlPainter oldDelegate) =>
-      icon != oldDelegate.icon;
+      icon != oldDelegate.icon ||
+      backgroundColor != oldDelegate.backgroundColor;
 }
 
 class _SettingsDialog extends StatefulWidget {
@@ -3110,10 +3226,8 @@ class _SettingsDialog extends StatefulWidget {
     required this.onExportBackup,
     required this.onImportBackup,
     required this.isSending,
-    required this.autonomyEnabled,
-    required this.onAutonomyChanged,
-    required this.autonomousCameraEnabled,
-    required this.onAutonomousCameraChanged,
+    required this.cameraEnabled,
+    required this.onCameraChanged,
     required this.saraCameraActive,
     required this.onStopSaraCamera,
     required this.onErrorNotification,
@@ -3125,10 +3239,8 @@ class _SettingsDialog extends StatefulWidget {
   final Future<void> Function() onExportBackup;
   final Future<void> Function() onImportBackup;
   final bool isSending;
-  final bool autonomyEnabled;
-  final Future<void> Function(bool enabled) onAutonomyChanged;
-  final bool autonomousCameraEnabled;
-  final Future<void> Function(bool enabled) onAutonomousCameraChanged;
+  final bool cameraEnabled;
+  final Future<void> Function(bool enabled) onCameraChanged;
   final ValueListenable<bool> saraCameraActive;
   final VoidCallback onStopSaraCamera;
   final void Function(String message) onErrorNotification;
@@ -3141,57 +3253,51 @@ class _SettingsDialogState extends State<_SettingsDialog> {
   int _section = 0;
   final _personalNameController = TextEditingController();
   final _apiKeyController = TextEditingController();
+  final _tavilyApiKeyController = TextEditingController();
+  final _tinyFishApiKeyController = TextEditingController();
+  final _firecrawlApiKeyController = TextEditingController();
   String _modelName = _defaultModel;
   List<String> _apiKeys = [];
+  bool _webSearchEnabled = false;
+  bool _isSavingWebSearchConfig = false;
   bool _isLoadingPersonal = true;
   bool _isSavingPersonal = false;
   bool _isLoadingAiConfig = true;
   bool _isSavingAiConfig = false;
   bool _isBackingUpData = false;
   bool _showConfigureHelp = false;
-  late bool _autonomyEnabled;
-  late bool _autonomousCameraEnabled;
+  late bool _cameraEnabled;
 
   @override
   void initState() {
     super.initState();
-    _autonomyEnabled = widget.autonomyEnabled;
-    _autonomousCameraEnabled = widget.autonomousCameraEnabled;
+    _cameraEnabled = widget.cameraEnabled;
     _loadAiConfig();
     _loadPersonal();
   }
 
-  Future<void> _setAutonomyEnabled(bool enabled) async {
-    final previous = _autonomyEnabled;
-    setState(() => _autonomyEnabled = enabled);
+  Future<void> _setCameraEnabled(bool enabled) async {
+    final previous = _cameraEnabled;
+    setState(() => _cameraEnabled = enabled);
     try {
-      await widget.onAutonomyChanged(enabled);
+      await widget.onCameraChanged(enabled);
     } catch (error) {
-      if (mounted) setState(() => _autonomyEnabled = previous);
-      _showMessage(appText(
-        'Could not update Sara’s autonomous life setting: {error}',
-        values: {'error': error},
-      ));
-    }
-  }
-
-  Future<void> _setAutonomousCameraEnabled(bool enabled) async {
-    final previous = _autonomousCameraEnabled;
-    setState(() => _autonomousCameraEnabled = enabled);
-    try {
-      await widget.onAutonomousCameraChanged(enabled);
-    } catch (error) {
-      if (mounted) setState(() => _autonomousCameraEnabled = previous);
-      _showMessage(appText(
-        'Could not update Sara’s camera access setting: {error}',
-        values: {'error': error},
-      ));
+      if (mounted) setState(() => _cameraEnabled = previous);
+      _showMessage(
+        appText(
+          'Could not update Sara’s camera access setting: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
   @override
   void dispose() {
     _apiKeyController.dispose();
+    _tavilyApiKeyController.dispose();
+    _tinyFishApiKeyController.dispose();
+    _firecrawlApiKeyController.dispose();
     _personalNameController.dispose();
     super.dispose();
   }
@@ -3207,10 +3313,12 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     } catch (error) {
       if (!mounted) return;
       setState(() => _isLoadingPersonal = false);
-      _showMessage(appText(
-        'Error reading personal data: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Error reading personal data: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
@@ -3226,14 +3334,17 @@ class _SettingsDialogState extends State<_SettingsDialog> {
       if (!mounted) return;
       setState(() => _isSavingPersonal = false);
       _showMessage(
-          appText(name.isEmpty ? 'Personal name removed.' : 'Name saved.'));
+        appText(name.isEmpty ? 'Personal name removed.' : 'Name saved.'),
+      );
     } catch (error) {
       if (!mounted) return;
       setState(() => _isSavingPersonal = false);
-      _showMessage(appText(
-        'Could not save personal name: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Could not save personal name: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
@@ -3241,10 +3352,12 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     try {
       await AppLanguageController.set(language);
     } catch (error) {
-      _showMessage(appText(
-        'Could not save selected language: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Could not save selected language: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
@@ -3279,10 +3392,26 @@ class _SettingsDialogState extends State<_SettingsDialog> {
       final provider = await widget.configStore.read(_providerStorageKey);
       final model = await widget.configStore.read(_modelStorageKey);
       final apiKeys = await widget.configStore.readApiKeys();
+      final webSearchEnabled = await widget.configStore.read(
+        WebSearchConfigKeys.enabled,
+      );
+      final tavilyApiKey = await widget.configStore.read(
+        WebSearchConfigKeys.tavilyApiKey,
+      );
+      final tinyFishApiKey = await widget.configStore.read(
+        WebSearchConfigKeys.tinyFishApiKey,
+      );
+      final firecrawlApiKey = await widget.configStore.read(
+        WebSearchConfigKeys.firecrawlApiKey,
+      );
       if (!mounted) return;
       setState(() {
         _modelName = model ?? _defaultModel;
         _apiKeys = apiKeys;
+        _webSearchEnabled = webSearchEnabled == 'true';
+        _tavilyApiKeyController.text = tavilyApiKey ?? '';
+        _tinyFishApiKeyController.text = tinyFishApiKey ?? '';
+        _firecrawlApiKeyController.text = firecrawlApiKey ?? '';
         _isLoadingAiConfig = false;
       });
       if (provider != null && provider != 'Gemini') {
@@ -3291,10 +3420,68 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     } catch (error) {
       if (!mounted) return;
       setState(() => _isLoadingAiConfig = false);
-      _showMessage(appText(
-        'Could not read AI settings from the keyring: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Could not read AI settings from the keyring: {error}',
+          values: {'error': error},
+        ),
+      );
+    }
+  }
+
+  void _onWebSearchEnabledChanged(bool enabled) {
+    setState(() => _webSearchEnabled = enabled);
+  }
+
+  Future<void> _saveWebSearchConfig() async {
+    final tavilyApiKey = _tavilyApiKeyController.text.trim();
+    final tinyFishApiKey = _tinyFishApiKeyController.text.trim();
+    final firecrawlApiKey = _firecrawlApiKeyController.text.trim();
+    if (_webSearchEnabled && tavilyApiKey.isEmpty && tinyFishApiKey.isEmpty) {
+      _showMessage(
+        appText('Add a Tavily or TinyFish API key to enable web search.'),
+      );
+      return;
+    }
+
+    setState(() => _isSavingWebSearchConfig = true);
+    try {
+      await _writeOptionalSecret(
+        WebSearchConfigKeys.tavilyApiKey,
+        tavilyApiKey,
+      );
+      await _writeOptionalSecret(
+        WebSearchConfigKeys.tinyFishApiKey,
+        tinyFishApiKey,
+      );
+      await _writeOptionalSecret(
+        WebSearchConfigKeys.firecrawlApiKey,
+        firecrawlApiKey,
+      );
+      await widget.configStore.write(
+        WebSearchConfigKeys.enabled,
+        _webSearchEnabled.toString(),
+      );
+      if (!mounted) return;
+      setState(() => _isSavingWebSearchConfig = false);
+      _showMessage(appText('Web search settings saved.'), isError: false);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _isSavingWebSearchConfig = false);
+      _showMessage(
+        appText(
+          'Could not save web search settings: {error}',
+          values: {'error': error},
+        ),
+      );
+    }
+  }
+
+  Future<void> _writeOptionalSecret(String key, String value) async {
+    if (value.isEmpty) {
+      await widget.configStore.delete(key);
+    } else {
+      await widget.configStore.write(key, value);
     }
   }
 
@@ -3326,10 +3513,12 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     } catch (error) {
       if (!mounted) return;
       setState(() => _isSavingAiConfig = false);
-      _showMessage(appText(
-        'Could not save Gemini settings: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Could not save Gemini settings: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
@@ -3352,10 +3541,12 @@ class _SettingsDialogState extends State<_SettingsDialog> {
     } catch (error) {
       if (!mounted) return;
       setState(() => _isSavingAiConfig = false);
-      _showMessage(appText(
-        'Could not remove Gemini API key: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Could not remove Gemini API key: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
@@ -3376,10 +3567,9 @@ class _SettingsDialogState extends State<_SettingsDialog> {
 
   Future<void> _openGoogleAiStudio() async {
     try {
-      final result = await Process.run(
-        'xdg-open',
-        ['https://aistudio.google.com/app/apikey'],
-      );
+      final result = await Process.run('xdg-open', [
+        'https://aistudio.google.com/app/apikey',
+      ]);
       if (result.exitCode != 0) {
         throw ProcessException(
           'xdg-open',
@@ -3389,27 +3579,24 @@ class _SettingsDialogState extends State<_SettingsDialog> {
         );
       }
     } catch (error) {
-      _showMessage(appText(
-        'Could not open Google AI Studio: {error}',
-        values: {'error': error},
-      ));
+      _showMessage(
+        appText(
+          'Could not open Google AI Studio: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
   void _showMessage(String message, {bool isError = true}) {
     if (isError) widget.onErrorNotification(message);
-    _showToast(
-      context,
-      message,
-      isError: isError,
-      notifyDesktop: false,
-    );
+    _showToast(context, message, isError: isError, notifyDesktop: false);
   }
 
   @override
   Widget build(BuildContext context) {
     return Dialog(
-      backgroundColor: const Color(0xFF252629),
+      backgroundColor: const Color(0xFF24262A),
       insetPadding: const EdgeInsets.all(24),
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
@@ -3424,7 +3611,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
             Container(
               height: 68,
               padding: const EdgeInsets.symmetric(horizontal: 20),
-              color: const Color(0xFF2D2E32),
+              color: const Color(0xFF2B2D31),
               child: Row(
                 children: [
                   _MacWindowControls(
@@ -3440,8 +3627,11 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                     ),
                   ),
                   const Spacer(),
-                  const Icon(LucideIcons300.slidersHorizontal,
-                      color: _muted, size: 17),
+                  const Icon(
+                    LucideIcons300.slidersHorizontal,
+                    color: _muted,
+                    size: 17,
+                  ),
                   const SizedBox(width: 8),
                   IconButton(
                     tooltip: appText('Close settings'),
@@ -3458,7 +3648,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                 children: [
                   Container(
                     width: 204,
-                    color: const Color(0xFF202124),
+                    color: const Color(0xFF202225),
                     padding: const EdgeInsets.fromLTRB(14, 20, 12, 4),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3507,9 +3697,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                             horizontal: 4,
                             vertical: 10,
                           ),
-                          decoration: BoxDecoration(
-                            color: Colors.transparent,
-                          ),
+                          decoration: BoxDecoration(color: Colors.transparent),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.center,
                             mainAxisSize: MainAxisSize.min,
@@ -3545,58 +3733,63 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                   Expanded(
                     child: Container(
                       key: const ValueKey('settings-content-panel'),
-                      color: const Color(0xFF252629),
-                      padding: const EdgeInsets.fromLTRB(24, 10, 24, 16),
+                      color: const Color(0xFF24262A),
+                      padding: const EdgeInsets.fromLTRB(26, 22, 26, 22),
                       child: Align(
                         alignment: Alignment.topLeft,
                         child: switch (_section) {
                           0 => SingleChildScrollView(
-                              child: _PersonalSettings(
-                                nameController: _personalNameController,
-                                isLoading: _isLoadingPersonal,
-                                isSaving: _isSavingPersonal,
-                                onSave: _savePersonal,
-                                onLanguageChanged: _setLanguage,
-                              ),
+                            child: _PersonalSettings(
+                              nameController: _personalNameController,
+                              isLoading: _isLoadingPersonal,
+                              isSaving: _isSavingPersonal,
+                              onSave: _savePersonal,
+                              onLanguageChanged: _setLanguage,
                             ),
+                          ),
                           1 => _ConfigureSettings(
-                              showHelp: _showConfigureHelp,
-                              onToggleHelp: () => setState(
-                                () => _showConfigureHelp = !_showConfigureHelp,
-                              ),
-                              onOpenGoogleAiStudio: _openGoogleAiStudio,
-                              aiApiSettings: _AiApiSettings(
-                                modelName: _modelName,
-                                apiKeyController: _apiKeyController,
-                                apiKeys: _apiKeys,
-                                isLoading: _isLoadingAiConfig,
-                                isSaving: _isSavingAiConfig,
-                                onSave: _saveAiConfig,
-                                onRemoveApiKey: _confirmRemoveApiKey,
-                              ),
+                            showHelp: _showConfigureHelp,
+                            onToggleHelp: () => setState(
+                              () => _showConfigureHelp = !_showConfigureHelp,
                             ),
+                            onOpenGoogleAiStudio: _openGoogleAiStudio,
+                            aiApiSettings: _AiApiSettings(
+                              modelName: _modelName,
+                              apiKeyController: _apiKeyController,
+                              apiKeys: _apiKeys,
+                              webSearchEnabled: _webSearchEnabled,
+                              tavilyApiKeyController: _tavilyApiKeyController,
+                              tinyFishApiKeyController:
+                                  _tinyFishApiKeyController,
+                              firecrawlApiKeyController:
+                                  _firecrawlApiKeyController,
+                              isLoading: _isLoadingAiConfig,
+                              isSaving: _isSavingAiConfig,
+                              isSavingWebSearch: _isSavingWebSearchConfig,
+                              onSave: _saveAiConfig,
+                              onWebSearchEnabledChanged:
+                                  _onWebSearchEnabledChanged,
+                              onSaveWebSearch: _saveWebSearchConfig,
+                              onRemoveApiKey: _confirmRemoveApiKey,
+                            ),
+                          ),
                           _ => SingleChildScrollView(
-                              child: _DataSettings(
-                                onClearChat: _confirmClearChat,
-                                onExportBackup: () => _runBackupAction(
-                                  widget.onExportBackup,
-                                ),
-                                onImportBackup: () => _runBackupAction(
-                                  widget.onImportBackup,
-                                  reloadPersonal: true,
-                                ),
-                                isBusy: widget.isSending || _isBackingUpData,
-                                isSending: widget.isSending,
-                                autonomyEnabled: _autonomyEnabled,
-                                onAutonomyChanged: _setAutonomyEnabled,
-                                autonomousCameraEnabled:
-                                    _autonomousCameraEnabled,
-                                onAutonomousCameraChanged:
-                                    _setAutonomousCameraEnabled,
-                                saraCameraActive: widget.saraCameraActive,
-                                onStopSaraCamera: widget.onStopSaraCamera,
+                            child: _DataSettings(
+                              onClearChat: _confirmClearChat,
+                              onExportBackup: () =>
+                                  _runBackupAction(widget.onExportBackup),
+                              onImportBackup: () => _runBackupAction(
+                                widget.onImportBackup,
+                                reloadPersonal: true,
                               ),
+                              isBusy: widget.isSending || _isBackingUpData,
+                              isSending: widget.isSending,
+                              cameraEnabled: _cameraEnabled,
+                              onCameraChanged: _setCameraEnabled,
+                              saraCameraActive: widget.saraCameraActive,
+                              onStopSaraCamera: widget.onStopSaraCamera,
                             ),
+                          ),
                         },
                       ),
                     ),
@@ -3618,11 +3811,7 @@ class _MacWindowControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const colors = [
-      Color(0xFFFF5F57),
-      Color(0xFFFFBD2E),
-      Color(0xFF28C840),
-    ];
+    const colors = [Color(0xFFFF5F57), Color(0xFFFFBD2E), Color(0xFF28C840)];
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -3653,9 +3842,7 @@ class _DatabaseStackIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     return CustomPaint(
       size: Size.square(size),
-      painter: _DatabaseStackPainter(
-        IconTheme.of(context).color ?? _muted,
-      ),
+      painter: _DatabaseStackPainter(IconTheme.of(context).color ?? _muted),
     );
   }
 }
@@ -3680,12 +3867,7 @@ class _DatabaseStackPainter extends CustomPainter {
       ..strokeWidth = stroke
       ..strokeCap = StrokeCap.round;
     canvas.drawOval(
-      Rect.fromLTWH(
-        bounds.left,
-        bounds.top,
-        bounds.width,
-        size.height * 0.20,
-      ),
+      Rect.fromLTWH(bounds.left, bounds.top, bounds.width, size.height * 0.20),
       paint,
     );
     canvas.drawLine(
@@ -3800,37 +3982,42 @@ class _SettingsNavItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: selected ? const Color(0xFF29364C) : Colors.transparent,
+      color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
-        child: SizedBox(
-          height: 42,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 11),
-            child: Row(
-              children: [
-                IconTheme(
-                  data: IconThemeData(
-                    size: 18,
-                    color: selected ? const Color(0xFF91B2FF) : _muted,
-                  ),
-                  child: icon,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    label,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: selected ? const Color(0xFFB7CCFF) : _text,
-                      fontSize: 12.5,
-                      fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-                    ),
-                  ),
-                ),
-              ],
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          height: 44,
+          padding: const EdgeInsets.symmetric(horizontal: 11),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFF29364C) : Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: selected ? const Color(0xFF3B5279) : Colors.transparent,
             ),
+          ),
+          child: Row(
+            children: [
+              IconTheme(
+                data: IconThemeData(
+                  size: 18,
+                  color: selected ? const Color(0xFF91B2FF) : _muted,
+                ),
+                child: icon,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: selected ? const Color(0xFFB7CCFF) : _text,
+                    fontSize: 12.5,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -3847,13 +4034,28 @@ class _MacSettingsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: const Color(0xFF2A2B2F),
-        borderRadius: BorderRadius.circular(13),
-        border: Border.all(color: const Color(0xFF343A44)),
+        color: const Color(0xFF292B30),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF393C42)),
       ),
       child: child,
+    );
+  }
+}
+
+class _SettingsGlyph extends StatelessWidget {
+  const _SettingsGlyph({required this.icon, required this.tint});
+
+  final Widget icon;
+  final Color tint;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconTheme(
+      data: IconThemeData(color: tint, size: 28),
+      child: icon,
     );
   }
 }
@@ -3863,7 +4065,7 @@ class _SettingsSectionHeader extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.subtitle,
-    this.iconSize = 20,
+    this.iconSize = 30,
     this.trailing,
   });
 
@@ -3876,22 +4078,24 @@ class _SettingsSectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.only(bottom: 22),
       child: Row(
         children: [
           Container(
-            width: iconSize >= 26 ? 46 : 42,
-            height: iconSize >= 26 ? 46 : 42,
+            key: const ValueKey('settings-section-icon-frame'),
+            width: 48,
+            height: 48,
+            alignment: Alignment.center,
             decoration: BoxDecoration(
               color: const Color(0xFF29364C),
-              borderRadius: BorderRadius.circular(13),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: const Color(0xFF435B83)),
             ),
-            child: IconTheme(
-              data: IconThemeData(
-                color: Color(0xFF91B2FF),
-                size: iconSize,
+            child: Center(
+              child: IconTheme(
+                data: IconThemeData(color: Color(0xFF91B2FF), size: iconSize),
+                child: icon,
               ),
-              child: icon,
             ),
           ),
           const SizedBox(width: 14),
@@ -3903,7 +4107,7 @@ class _SettingsSectionHeader extends StatelessWidget {
                   title,
                   style: const TextStyle(
                     color: _text,
-                    fontSize: 20,
+                    fontSize: 21,
                     fontWeight: FontWeight.w600,
                     letterSpacing: -0.3,
                   ),
@@ -3945,7 +4149,7 @@ class _PersonalSettings extends StatelessWidget {
       children: [
         _SettingsSectionHeader(
           icon: const Icon(LucideIcons300.userRound),
-          iconSize: 28,
+          iconSize: 30,
           title: appText('Personal'),
           subtitle: appText('Make Sara feel more like yours.'),
         ),
@@ -3971,15 +4175,28 @@ class _PersonalSettings extends StatelessWidget {
                   textCapitalization: TextCapitalization.words,
                   decoration: InputDecoration(
                     hintText: appText('Your name'),
+                    prefixIcon: const Icon(LucideIcons300.userRound, size: 17),
+                    filled: true,
+                    fillColor: const Color(0xFF22262D),
                     isDense: true,
-                    border: const OutlineInputBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(9)),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 13,
                     ),
-                    enabledBorder: const OutlineInputBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(9)),
-                      borderSide: BorderSide(color: _border),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(11),
+                      borderSide: const BorderSide(color: Color(0xFF414957)),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(11),
+                      borderSide: const BorderSide(color: Color(0xFF414957)),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(11),
+                      borderSide: const BorderSide(color: _accent),
                     ),
                   ),
+                  style: const TextStyle(color: _text, fontSize: 13),
                 ),
                 const SizedBox(height: 12),
                 Row(
@@ -4019,6 +4236,15 @@ class _PersonalSettings extends StatelessWidget {
           _MacSettingsCard(
             child: Row(
               children: [
+                const _SettingsGlyph(
+                  icon: Icon(
+                    LucideIcons300.globe,
+                    key: ValueKey('settings-language-icon'),
+                    size: 28,
+                  ),
+                  tint: Color(0xFF9AB7FF),
+                ),
+                const SizedBox(width: 14),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -4055,12 +4281,14 @@ class _PersonalSettings extends StatelessWidget {
                       child: Text(
                         appText('English'),
                         style: TextStyle(
-                          color: AppLanguageController.language.value ==
+                          color:
+                              AppLanguageController.language.value ==
                                   AppLanguage.english
                               ? Colors.white
                               : _muted,
                           fontSize: 12,
-                          fontWeight: AppLanguageController.language.value ==
+                          fontWeight:
+                              AppLanguageController.language.value ==
                                   AppLanguage.english
                               ? FontWeight.w600
                               : FontWeight.w400,
@@ -4075,12 +4303,14 @@ class _PersonalSettings extends StatelessWidget {
                       child: Text(
                         appText('Indonesian'),
                         style: TextStyle(
-                          color: AppLanguageController.language.value ==
+                          color:
+                              AppLanguageController.language.value ==
                                   AppLanguage.indonesian
                               ? Colors.white
                               : _muted,
                           fontSize: 12,
-                          fontWeight: AppLanguageController.language.value ==
+                          fontWeight:
+                              AppLanguageController.language.value ==
                                   AppLanguage.indonesian
                               ? FontWeight.w600
                               : FontWeight.w400,
@@ -4108,10 +4338,8 @@ class _DataSettings extends StatelessWidget {
     required this.onImportBackup,
     required this.isBusy,
     required this.isSending,
-    required this.autonomyEnabled,
-    required this.onAutonomyChanged,
-    required this.autonomousCameraEnabled,
-    required this.onAutonomousCameraChanged,
+    required this.cameraEnabled,
+    required this.onCameraChanged,
     required this.saraCameraActive,
     required this.onStopSaraCamera,
   });
@@ -4121,10 +4349,8 @@ class _DataSettings extends StatelessWidget {
   final VoidCallback onImportBackup;
   final bool isBusy;
   final bool isSending;
-  final bool autonomyEnabled;
-  final Future<void> Function(bool enabled) onAutonomyChanged;
-  final bool autonomousCameraEnabled;
-  final Future<void> Function(bool enabled) onAutonomousCameraChanged;
+  final bool cameraEnabled;
+  final Future<void> Function(bool enabled) onCameraChanged;
   final ValueListenable<bool> saraCameraActive;
   final VoidCallback onStopSaraCamera;
 
@@ -4136,47 +4362,11 @@ class _DataSettings extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _SettingsSectionHeader(
-          icon: const _DatabaseStackIcon(size: 20),
+          icon: const _DatabaseStackIcon(size: 36),
+          iconSize: 30,
           title: appText('Data'),
           subtitle: appText('Manage your local chat data.'),
         ),
-        _MacSettingsCard(
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      appText('Sara’s autonomous life'),
-                      style: const TextStyle(
-                        color: _text,
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      appText(
-                        'Sara can reflect and sometimes start a chat while the app is open. Reflection summaries, inner life, and long-term goals stay in local storage; recent chat and selected summaries are sent to Gemini while she thinks. Provider limits apply.',
-                      ),
-                      style: const TextStyle(color: _muted, fontSize: 11),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              Switch(
-                key: const ValueKey('autonomous-life-switch'),
-                value: autonomyEnabled,
-                onChanged: isBusy
-                    ? null
-                    : (enabled) => unawaited(onAutonomyChanged(enabled)),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
         ValueListenableBuilder<bool>(
           valueListenable: saraCameraActive,
           builder: (context, isCameraActive, _) => isCameraActive
@@ -4215,7 +4405,7 @@ class _DataSettings extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      appText('Allow Sara to use the camera'),
+                      appText('Allow camera access'),
                       style: const TextStyle(
                         color: _text,
                         fontSize: 12.5,
@@ -4225,7 +4415,7 @@ class _DataSettings extends StatelessWidget {
                     const SizedBox(height: 4),
                     Text(
                       appText(
-                        'When enabled, Sara may choose to view camera frames while the app is running, including when minimized or Settings is open. Frames are sent to Gemini for analysis and temporary cache files are deleted after analysis.',
+                        'When enabled, Sara can use a temporary camera frame to answer your request. The frame is sent to Gemini and deleted after analysis.',
                       ),
                       style: const TextStyle(color: _muted, fontSize: 11),
                     ),
@@ -4234,12 +4424,26 @@ class _DataSettings extends StatelessWidget {
               ),
               const SizedBox(width: 12),
               Switch(
-                key: const ValueKey('autonomous-camera-switch'),
-                value: autonomousCameraEnabled,
+                key: const ValueKey('camera-access-switch'),
+                value: cameraEnabled,
                 onChanged: isBusy
                     ? null
-                    : (enabled) =>
-                        unawaited(onAutonomousCameraChanged(enabled)),
+                    : (enabled) => unawaited(onCameraChanged(enabled)),
+                thumbColor: WidgetStateProperty.resolveWith(
+                  (states) => states.contains(WidgetState.selected)
+                      ? const Color(0xFFDCE4F5)
+                      : const Color(0xFFB4BAC7),
+                ),
+                trackColor: WidgetStateProperty.resolveWith(
+                  (states) => states.contains(WidgetState.selected)
+                      ? const Color(0xFF46536D)
+                      : const Color(0xFF414752),
+                ),
+                trackOutlineColor: WidgetStateProperty.resolveWith(
+                  (states) => states.contains(WidgetState.selected)
+                      ? const Color(0xFF46536D)
+                      : const Color(0xFF687080),
+                ),
               ),
             ],
           ),
@@ -4320,9 +4524,13 @@ class _DataSettings extends StatelessWidget {
                   children: [
                     const _TrashCanIcon(color: Color(0xFFFFE9E9), size: 17),
                     const SizedBox(width: 7),
-                    Text(appText(
-                      isSending ? 'Wait for response to finish' : 'Clear chat',
-                    )),
+                    Text(
+                      appText(
+                        isSending
+                            ? 'Wait for response to finish'
+                            : 'Clear chat',
+                      ),
+                    ),
                   ],
                 ),
                 style: FilledButton.styleFrom(
@@ -4374,11 +4582,7 @@ class _BackupActionButton extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  icon,
-                  size: 16,
-                  color: isEnabled ? _accent : _muted,
-                ),
+                Icon(icon, size: 16, color: isEnabled ? _accent : _muted),
                 const SizedBox(width: 7),
                 Text(
                   label,
@@ -4413,11 +4617,12 @@ class _ConfigureSettings extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView(
+      key: const ValueKey('configure-settings-scroll-view'),
       padding: EdgeInsets.zero,
       children: [
         _SettingsSectionHeader(
           icon: const Icon(LucideIcons300.slidersHorizontal),
-          iconSize: 28,
+          iconSize: 30,
           title: appText('Configure'),
           subtitle: appText('Adjust your AI connection settings.'),
           trailing: IconButton(
@@ -4467,9 +4672,7 @@ class _ConfigureHelp extends StatelessWidget {
           ),
           const SizedBox(height: 8),
           Text(
-            appText(
-              'Follow these steps to connect Sara to the Gemini API:',
-            ),
+            appText('Follow these steps to connect Sara to the Gemini API:'),
             style: const TextStyle(color: _muted, fontSize: 12, height: 1.5),
           ),
           const SizedBox(height: 14),
@@ -4481,9 +4684,7 @@ class _ConfigureHelp extends StatelessWidget {
           ),
           _ConfigurationHelpStep(
             number: '2',
-            text: appText(
-              'Create a Gemini API key from the API keys page.',
-            ),
+            text: appText('Create a Gemini API key from the API keys page.'),
           ),
           _ConfigurationHelpStep(
             number: '3',
@@ -4511,10 +4712,7 @@ class _ConfigureHelp extends StatelessWidget {
 }
 
 class _ConfigurationHelpStep extends StatelessWidget {
-  const _ConfigurationHelpStep({
-    required this.number,
-    required this.text,
-  });
+  const _ConfigurationHelpStep({required this.number, required this.text});
 
   final String number;
   final String text;
@@ -4561,18 +4759,32 @@ class _AiApiSettings extends StatelessWidget {
     required this.modelName,
     required this.apiKeyController,
     required this.apiKeys,
+    required this.webSearchEnabled,
+    required this.tavilyApiKeyController,
+    required this.tinyFishApiKeyController,
+    required this.firecrawlApiKeyController,
     required this.isLoading,
     required this.isSaving,
+    required this.isSavingWebSearch,
     required this.onSave,
+    required this.onWebSearchEnabledChanged,
+    required this.onSaveWebSearch,
     required this.onRemoveApiKey,
   });
 
   final String modelName;
   final TextEditingController apiKeyController;
   final List<String> apiKeys;
+  final bool webSearchEnabled;
+  final TextEditingController tavilyApiKeyController;
+  final TextEditingController tinyFishApiKeyController;
+  final TextEditingController firecrawlApiKeyController;
   final bool isLoading;
   final bool isSaving;
+  final bool isSavingWebSearch;
   final VoidCallback onSave;
+  final ValueChanged<bool> onWebSearchEnabledChanged;
+  final VoidCallback onSaveWebSearch;
   final ValueChanged<int> onRemoveApiKey;
 
   @override
@@ -4626,15 +4838,19 @@ class _AiApiSettings extends StatelessWidget {
                     ),
                   ),
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 4,
+                    ),
                     decoration: BoxDecoration(
                       color: const Color(0xFF2C3038),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Text(
-                      appText('{count} added',
-                          values: {'count': apiKeys.length}),
+                      appText(
+                        '{count} added',
+                        values: {'count': apiKeys.length},
+                      ),
                       style: const TextStyle(color: _muted, fontSize: 10.5),
                     ),
                   ),
@@ -4658,13 +4874,7 @@ class _AiApiSettings extends StatelessWidget {
                   ),
                 )
               else
-                ...apiKeys.indexed.map(
-                  (entry) => _ApiKeyTile(
-                    index: entry.$1,
-                    apiKey: entry.$2,
-                    onRemove: () => onRemoveApiKey(entry.$1),
-                  ),
-                ),
+                _ApiKeyList(apiKeys: apiKeys, onRemoveApiKey: onRemoveApiKey),
               const SizedBox(height: 10),
               _FieldLabel(appText('Add another API key')),
               const SizedBox(height: 7),
@@ -4710,8 +4920,9 @@ class _AiApiSettings extends StatelessWidget {
                             ),
                           )
                         : const Icon(LucideIcons300.plus, size: 16),
-                    label:
-                        Text(appText(isSaving ? 'Saving...' : 'Add API key')),
+                    label: Text(
+                      appText(isSaving ? 'Saving...' : 'Add API key'),
+                    ),
                     style: FilledButton.styleFrom(
                       backgroundColor: const Color(0xFF416BC5),
                       foregroundColor: Colors.white,
@@ -4719,6 +4930,135 @@ class _AiApiSettings extends StatelessWidget {
                     ),
                   ),
                 ],
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
+        _MacSettingsCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      appText('Web search'),
+                      style: const TextStyle(
+                        color: _text,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Switch(
+                    key: const ValueKey('web-search-enabled-switch'),
+                    value: webSearchEnabled,
+                    onChanged: onWebSearchEnabledChanged,
+                    thumbColor: WidgetStateProperty.resolveWith(
+                      (states) => states.contains(WidgetState.selected)
+                          ? const Color(0xFFDCE4F5)
+                          : const Color(0xFFB4BAC7),
+                    ),
+                    trackColor: WidgetStateProperty.resolveWith(
+                      (states) => states.contains(WidgetState.selected)
+                          ? const Color(0xFF46536D)
+                          : const Color(0xFF414752),
+                    ),
+                    trackOutlineColor: WidgetStateProperty.resolveWith(
+                      (states) => states.contains(WidgetState.selected)
+                          ? const Color(0xFF46536D)
+                          : const Color(0xFF687080),
+                    ),
+                  ),
+                ],
+              ),
+              Text(
+                appText(
+                  'Allow Sara to search the web with tools when current information is needed.',
+                ),
+                style: const TextStyle(color: _muted, fontSize: 11),
+              ),
+              if (webSearchEnabled) ...[
+                const SizedBox(height: 14),
+                _FieldLabel(appText('Tavily API key')),
+                const SizedBox(height: 7),
+                TextField(
+                  key: const ValueKey('web-search-tavily-key-field'),
+                  controller: tavilyApiKeyController,
+                  obscureText: true,
+                  enableSuggestions: false,
+                  autocorrect: false,
+                  decoration: _settingsInputDecoration(
+                    hintText: appText('Enter Tavily API key'),
+                    prefixIcon: const Icon(LucideIcons300.keyRound, size: 18),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _FieldLabel(appText('TinyFish API key')),
+                const SizedBox(height: 7),
+                TextField(
+                  key: const ValueKey('web-search-tinyfish-key-field'),
+                  controller: tinyFishApiKeyController,
+                  obscureText: true,
+                  enableSuggestions: false,
+                  autocorrect: false,
+                  decoration: _settingsInputDecoration(
+                    hintText: appText('Enter TinyFish API key'),
+                    prefixIcon: const Icon(LucideIcons300.keyRound, size: 18),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _FieldLabel(appText('Firecrawl API key (optional)')),
+                const SizedBox(height: 7),
+                TextField(
+                  key: const ValueKey('web-search-firecrawl-key-field'),
+                  controller: firecrawlApiKeyController,
+                  obscureText: true,
+                  enableSuggestions: false,
+                  autocorrect: false,
+                  decoration: _settingsInputDecoration(
+                    hintText: appText('Leave blank to search without a key'),
+                    prefixIcon: const Icon(LucideIcons300.keyRound, size: 18),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  appText(
+                    'Add at least one Tavily or TinyFish key. Firecrawl can be used without a key, with lower request limits.',
+                  ),
+                  style: const TextStyle(color: _muted, fontSize: 10.5),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton.icon(
+                  key: const ValueKey('save-web-search-settings'),
+                  onPressed: isSavingWebSearch ? null : onSaveWebSearch,
+                  icon: isSavingWebSearch
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(LucideIcons300.save, size: 16),
+                  label: Text(
+                    appText(
+                      isSavingWebSearch
+                          ? 'Saving...'
+                          : 'Save web search settings',
+                    ),
+                  ),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF416BC5),
+                    foregroundColor: Colors.white,
+                    textStyle: const TextStyle(fontSize: 11.5),
+                  ),
+                ),
               ),
             ],
           ),
@@ -4749,28 +5089,25 @@ class _SettingsValueCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       constraints: const BoxConstraints(minHeight: 104),
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF20242B),
-        borderRadius: BorderRadius.circular(13),
-        border: Border.all(color: const Color(0xFF343A44)),
+        color: const Color(0xFF222730),
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: const Color(0xFF394352)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(icon, size: 16, color: const Color(0xFF91B2FF)),
-              const SizedBox(width: 7),
-              Text(
-                title,
-                style: const TextStyle(color: _muted, fontSize: 11),
-              ),
+              Icon(icon, size: 20, color: const Color(0xFF9AB7FF)),
+              const SizedBox(width: 9),
+              Text(title, style: const TextStyle(color: _muted, fontSize: 11)),
               const Spacer(),
               const Icon(LucideIcons300.lockKeyhole, size: 13, color: _muted),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 13),
           Text(
             value,
             key: valueKey,
@@ -4778,7 +5115,7 @@ class _SettingsValueCard extends StatelessWidget {
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
               color: _text,
-              fontSize: 12,
+              fontSize: 12.5,
               fontWeight: FontWeight.w500,
               fontFamily: monospace ? 'monospace' : null,
             ),
@@ -4804,20 +5141,26 @@ class _ApiKeyTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final visibleSuffix =
-        apiKey.length <= 4 ? apiKey : apiKey.substring(apiKey.length - 4);
+    final visibleSuffix = apiKey.length <= 4
+        ? apiKey
+        : apiKey.substring(apiKey.length - 4);
     return Container(
+      key: ValueKey('api-key-tile-${index + 1}'),
       margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.fromLTRB(10, 5, 5, 5),
+      padding: const EdgeInsets.fromLTRB(8, 5, 5, 5),
       decoration: BoxDecoration(
-        color: _surfaceRaised,
-        borderRadius: BorderRadius.circular(9),
-        border: Border.all(color: _border),
+        color: const Color(0xFF222730),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: const Color(0xFF394352)),
       ),
       child: Row(
         children: [
-          const Icon(LucideIcons300.keyRound, size: 15, color: _muted),
-          const SizedBox(width: 8),
+          const Icon(
+            LucideIcons300.keyRound,
+            size: 18,
+            color: Color(0xFF9AB7FF),
+          ),
+          const SizedBox(width: 9),
           Expanded(
             child: Text(
               '${appText('API key')} ${index + 1}  ••••$visibleSuffix',
@@ -4825,15 +5168,71 @@ class _ApiKeyTile extends StatelessWidget {
             ),
           ),
           IconButton(
-            tooltip:
-                appText('Remove API key {index}', values: {'index': index + 1}),
+            tooltip: appText(
+              'Remove API key {index}',
+              values: {'index': index + 1},
+            ),
             onPressed: onRemove,
             icon: const Icon(LucideIcons300.x, size: 16),
             color: _muted,
             constraints: const BoxConstraints.tightFor(width: 30, height: 30),
             padding: EdgeInsets.zero,
+            style: IconButton.styleFrom(
+              backgroundColor: const Color(0xFF2B3039),
+              shape: const CircleBorder(),
+            ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ApiKeyList extends StatefulWidget {
+  const _ApiKeyList({required this.apiKeys, required this.onRemoveApiKey});
+
+  final List<String> apiKeys;
+  final ValueChanged<int> onRemoveApiKey;
+
+  @override
+  State<_ApiKeyList> createState() => _ApiKeyListState();
+}
+
+class _ApiKeyListState extends State<_ApiKeyList> {
+  final _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleCount = math.min(widget.apiKeys.length, 3);
+    final canScroll = widget.apiKeys.length > visibleCount;
+    return SizedBox(
+      key: const ValueKey('api-key-list-viewport'),
+      height: visibleCount.toDouble() * 46,
+      child: Scrollbar(
+        controller: _scrollController,
+        thumbVisibility: canScroll,
+        trackVisibility: canScroll,
+        interactive: true,
+        child: ListView.builder(
+          key: const ValueKey('api-key-scroll-list'),
+          controller: _scrollController,
+          primary: false,
+          padding: const EdgeInsets.only(right: 8),
+          physics: const ClampingScrollPhysics(),
+          itemCount: widget.apiKeys.length,
+          itemExtent: 46,
+          itemBuilder: (context, index) => _ApiKeyTile(
+            index: index,
+            apiKey: widget.apiKeys[index],
+            onRemove: () => widget.onRemoveApiKey(index),
+          ),
+        ),
       ),
     );
   }
@@ -4884,6 +5283,122 @@ InputDecoration _settingsInputDecoration({
   );
 }
 
+class _SearchResultSource {
+  const _SearchResultSource({required this.title, required this.uri});
+
+  final String title;
+  final Uri uri;
+}
+
+List<_SearchResultSource> _searchResultSources(String content) {
+  final heading = RegExp(r'\*\*(?:Search sources|Sumber pencarian)\*\*');
+  final headingMatch = heading.firstMatch(content);
+  if (headingMatch == null) return const [];
+  final sourceSection = content.substring(headingMatch.end);
+  final sourcePattern = RegExp(
+    r'^-\s+\[(.*)\]\((https?://[^)\s]+)\)\s*$',
+    multiLine: true,
+  );
+  final sources = <_SearchResultSource>[];
+  final seenUris = <String>{};
+  for (final match in sourcePattern.allMatches(sourceSection)) {
+    final uri = Uri.tryParse(match.group(2)!);
+    if (uri == null || !_isValidWebUri(uri) || !seenUris.add(uri.toString())) {
+      continue;
+    }
+    sources.add(
+      _SearchResultSource(
+        title: match
+            .group(1)!
+            .replaceAll(r'\[', '[')
+            .replaceAll(r'\]', ']')
+            .replaceAll(r'\(', '(')
+            .replaceAll(r'\)', ')'),
+        uri: uri,
+      ),
+    );
+  }
+  return sources;
+}
+
+List<_SearchResultSource> _messageResultSources(String content) {
+  final sources = _searchResultSources(content);
+  final sourceUrls = {for (final source in sources) source.uri.toString()};
+  final linkTitles = <String, String>{};
+  final markdownLinks = RegExp(
+    r'\[(.*)\]\((https?://[^)\s]+)\)',
+  ).allMatches(content);
+  for (final match in markdownLinks) {
+    final uri = Uri.tryParse(match.group(2)!);
+    if (uri == null || !_isValidWebUri(uri)) continue;
+    linkTitles.putIfAbsent(
+      uri.toString(),
+      () => match
+          .group(1)!
+          .replaceAll(r'\[', '[')
+          .replaceAll(r'\]', ']')
+          .replaceAll(r'\(', '(')
+          .replaceAll(r'\)', ')'),
+    );
+  }
+  for (final uri in _messageWebUris(content)) {
+    if (!sourceUrls.add(uri.toString())) continue;
+    sources.add(
+      _SearchResultSource(title: linkTitles[uri.toString()] ?? '', uri: uri),
+    );
+  }
+  return sources;
+}
+
+bool _isValidWebUri(Uri uri) {
+  if ((uri.scheme != 'http' && uri.scheme != 'https') ||
+      !uri.hasAuthority ||
+      uri.host.isEmpty ||
+      uri.userInfo.isNotEmpty) {
+    return false;
+  }
+  try {
+    return uri.port > 0 && uri.port <= 65535;
+  } on FormatException {
+    return false;
+  }
+}
+
+List<Uri> _messageWebUris(String content) {
+  final plainText = content
+      .replaceAll(RegExp(r'```[\s\S]*?```'), '')
+      .replaceAll(RegExp(r'`[^`]*`'), '');
+  final seenUris = <String>{};
+  final uris = <Uri>[];
+  for (final match in RegExp(r'https?://[^\s<>()\]]+').allMatches(plainText)) {
+    final link = match.group(0)!.replaceFirst(RegExp(r'[.,!?;:"]+$'), '');
+    final uri = Uri.tryParse(link);
+    if (uri != null && _isValidWebUri(uri) && seenUris.add(uri.toString())) {
+      uris.add(uri);
+    }
+  }
+  return uris;
+}
+
+String _searchResultDate(int createdAtUtc) {
+  final jakarta = DateTime.fromMillisecondsSinceEpoch(
+    createdAtUtc,
+    isUtc: true,
+  ).add(const Duration(hours: 7));
+  final year = jakarta.year.toString().padLeft(4, '0');
+  final month = jakarta.month.toString().padLeft(2, '0');
+  final day = jakarta.day.toString().padLeft(2, '0');
+  return '$year/$month/$day';
+}
+
+String _messageContentWithoutSearchSources(String content) {
+  final heading = RegExp(r'\*\*(?:Search sources|Sumber pencarian)\*\*');
+  final headingMatch = heading.firstMatch(content);
+  return headingMatch == null
+      ? content
+      : content.substring(0, headingMatch.start).trimRight();
+}
+
 class _ConversationView extends StatelessWidget {
   const _ConversationView({
     required this.messages,
@@ -4894,6 +5409,7 @@ class _ConversationView extends StatelessWidget {
     required this.onRetryMessage,
     required this.onDeleteMessage,
     required this.onEditMessage,
+    required this.onProactiveModeChanged,
     required this.messageBranches,
     required this.onActivateBranch,
     required this.onRegenerateMessage,
@@ -4910,6 +5426,8 @@ class _ConversationView extends StatelessWidget {
     required this.showScrollToBottom,
     required this.onScrollToBottom,
     required this.onScrollMetricsChanged,
+    required this.onUserScroll,
+    required this.onShowSearchResults,
   });
 
   final List<ChatMessage> messages;
@@ -4924,141 +5442,180 @@ class _ConversationView extends StatelessWidget {
     String content,
     List<ChatAttachment> attachments,
     bool allowAiReply,
-  ) onEditMessage;
+  )
+  onEditMessage;
+  final ValueChanged<bool> onProactiveModeChanged;
   final Map<String, MessageBranchNavigation> messageBranches;
   final ValueChanged<String> onActivateBranch;
   final ValueChanged<String> onRegenerateMessage;
   final Map<String, List<ChatAttachment>> attachmentsByMessage;
   final Map<String, List<TerminalCommandHistoryEntry>>
-      terminalActivitiesByResponse;
+  terminalActivitiesByResponse;
   final String? activeReplyResponseMessageId;
   final Map<String, int> assistantFeedback;
   final void Function(
-          String userMessageId, String responseMessageId, int? rating)
-      onSetAssistantFeedback;
+    String userMessageId,
+    String responseMessageId,
+    int? rating,
+  )
+  onSetAssistantFeedback;
   final Map<String, String> assistantReactions;
   final void Function(
     String userMessageId,
     String responseMessageId,
     String? reaction,
-  ) onSetAssistantReaction;
+  )
+  onSetAssistantReaction;
   final String? speakingMessageId;
   final String? loadingSpeechMessageId;
   final Future<void> Function(String messageId, String text) onToggleSpeech;
   final bool showScrollToBottom;
   final VoidCallback onScrollToBottom;
   final VoidCallback onScrollMetricsChanged;
+  final VoidCallback onUserScroll;
+  final ValueChanged<String> onShowSearchResults;
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      children: [
-        Scrollbar(
-          controller: scrollController,
-          child: NotificationListener<ScrollMetricsNotification>(
-            onNotification: (_) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                onScrollMetricsChanged();
-              });
-              return false;
-            },
-            child: ScrollConfiguration(
-              behavior: ScrollConfiguration.of(context).copyWith(
-                scrollbars: false,
-              ),
-              child: ListView.builder(
-                controller: scrollController,
-                padding: const EdgeInsets.fromLTRB(0, 42, 0, 180),
-                itemCount: messages.length + (showReplyIndicator ? 1 : 0),
-                itemBuilder: (context, index) {
-                  if (index == messages.length) {
-                    return Center(
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 760),
-                        child: Padding(
-                          padding: EdgeInsets.symmetric(horizontal: 24),
-                          child: _ThinkingIndicator(),
-                        ),
-                      ),
-                    );
-                  }
-                  final message = messages[index];
-                  return Center(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 760),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 24),
-                        child: _MessageRow(
-                          key: ValueKey(message.id),
-                          message: message,
-                          retryError: retryErrors[message.id],
-                          onRetry: () => onRetryMessage(message.id),
-                          retryEnabled: !isSending,
-                          onDelete: () => onDeleteMessage(message.id),
-                          deleteEnabled: !isSending,
-                          onEditMessage: onEditMessage,
-                          editEnabled: !isSending,
-                          branch: messageBranches[message.id],
-                          onActivateBranch: onActivateBranch,
-                          onRegenerate: () => onRegenerateMessage(message.id),
-                          regenerateEnabled: !isSending,
-                          attachments: attachmentsByMessage[message.id] ??
-                              const <ChatAttachment>[],
-                          terminalActivities:
-                              terminalActivitiesByResponse[message.id] ??
+    return LayoutBuilder(
+      builder: (context, constraints) => Stack(
+        children: [
+          Scrollbar(
+            controller: scrollController,
+            child: NotificationListener<ScrollNotification>(
+              onNotification: (notification) {
+                if (notification is UserScrollNotification ||
+                    (notification is ScrollUpdateNotification &&
+                        notification.dragDetails != null)) {
+                  onUserScroll();
+                }
+                return false;
+              },
+              child: NotificationListener<ScrollMetricsNotification>(
+                onNotification: (_) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    onScrollMetricsChanged();
+                  });
+                  return false;
+                },
+                child: ScrollConfiguration(
+                  behavior: ScrollConfiguration.of(
+                    context,
+                  ).copyWith(scrollbars: false),
+                  child: ListView.builder(
+                    controller: scrollController,
+                    padding: const EdgeInsets.fromLTRB(0, 42, 0, 24),
+                    itemCount: messages.length + (showReplyIndicator ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (index == messages.length) {
+                        return Center(
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 760),
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 24),
+                              child: _ThinkingIndicator(),
+                            ),
+                          ),
+                        );
+                      }
+                      final message = messages[index];
+                      final feedbackUserMessageId = _previousUserMessageId(
+                        index,
+                      );
+                      final hasUserParent =
+                          message.role == 'model' &&
+                          index > 0 &&
+                          messages[index - 1].role == 'user';
+                      final canReactToMessage =
+                          message.role == 'model' &&
+                          feedbackUserMessageId != null;
+                      return Center(
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 760),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
+                            child: _MessageRow(
+                              key: ValueKey(message.id),
+                              message: message,
+                              retryError: retryErrors[message.id],
+                              onRetry: () => onRetryMessage(message.id),
+                              retryEnabled: !isSending,
+                              onDelete: () => onDeleteMessage(message.id),
+                              deleteEnabled: !isSending,
+                              onEditMessage: onEditMessage,
+                              onProactiveModeChanged: onProactiveModeChanged,
+                              editEnabled: !isSending,
+                              branch: messageBranches[message.id],
+                              onActivateBranch: onActivateBranch,
+                              onRegenerate: () =>
+                                  onRegenerateMessage(message.id),
+                              regenerateEnabled: !isSending && hasUserParent,
+                              attachments:
+                                  attachmentsByMessage[message.id] ??
+                                  const <ChatAttachment>[],
+                              terminalActivities:
+                                  terminalActivitiesByResponse[message.id] ??
                                   const <TerminalCommandHistoryEntry>[],
-                          isActiveReply:
-                              activeReplyResponseMessageId == message.id,
-                          feedbackUserMessageId: _previousUserMessageId(index),
-                          feedbackRating: assistantFeedback[message.id],
-                          feedbackEnabled: !isSending,
-                          onSetFeedback: onSetAssistantFeedback,
-                          reaction: assistantReactions[message.id],
-                          onSetReaction: onSetAssistantReaction,
-                          isSpeechPlaying: speakingMessageId == message.id,
-                          isSpeechLoading: loadingSpeechMessageId == message.id,
-                          onToggleSpeech: () => onToggleSpeech(
-                            message.id,
-                            message.content,
+                              isActiveReply:
+                                  activeReplyResponseMessageId == message.id,
+                              feedbackUserMessageId: feedbackUserMessageId,
+                              feedbackRating: assistantFeedback[message.id],
+                              feedbackEnabled: !isSending && hasUserParent,
+                              reactionEnabled: !isSending && canReactToMessage,
+                              onSetFeedback: onSetAssistantFeedback,
+                              reaction: assistantReactions[message.id],
+                              onSetReaction: onSetAssistantReaction,
+                              isSpeechPlaying: speakingMessageId == message.id,
+                              isSpeechLoading:
+                                  loadingSpeechMessageId == message.id,
+                              onToggleSpeech: () =>
+                                  onToggleSpeech(message.id, message.content),
+                              onShowSearchResults: () =>
+                                  onShowSearchResults(message.id),
+                            ),
                           ),
                         ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-        ),
-        if (showScrollToBottom)
-          Positioned(
-            right: ((MediaQuery.sizeOf(context).width - 760) / 2)
-                .clamp(16.0, double.infinity),
-            bottom: 136,
-            child: Material(
-              color: const Color(0xFF20242B),
-              shape: const CircleBorder(),
-              elevation: 1,
-              child: SizedBox(
-                width: 32,
-                height: 32,
-                child: IconButton(
-                  key: const ValueKey('scroll-to-bottom-button'),
-                  tooltip: appText('Scroll to bottom'),
-                  onPressed: onScrollToBottom,
-                  icon: const CustomPaint(
-                    key: ValueKey('scroll-to-bottom-icon'),
-                    size: Size(17, 17),
-                    painter: _ScrollDownIconPainter(),
+                      );
+                    },
                   ),
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints.tightFor(width: 32, height: 32),
                 ),
               ),
             ),
           ),
-      ],
+          if (showScrollToBottom)
+            Positioned(
+              right: ((constraints.maxWidth - 760) / 2).clamp(
+                16.0,
+                double.infinity,
+              ),
+              bottom: 0,
+              child: Material(
+                color: const Color(0xFF20242B),
+                shape: const CircleBorder(),
+                elevation: 1,
+                child: SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: IconButton(
+                    key: const ValueKey('scroll-to-bottom-button'),
+                    tooltip: appText('Scroll to bottom'),
+                    onPressed: onScrollToBottom,
+                    icon: const CustomPaint(
+                      key: ValueKey('scroll-to-bottom-icon'),
+                      size: Size(17, 17),
+                      painter: _ScrollDownIconPainter(),
+                    ),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 32,
+                      height: 32,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
@@ -5068,13 +5625,6 @@ class _ConversationView extends StatelessWidget {
     }
     return null;
   }
-}
-
-class _TemporaryResponseHandoff {
-  _TemporaryResponseHandoff({required this.handoff});
-
-  final SaraResponseHandoff handoff;
-  int remainingCycles = 3;
 }
 
 class _PendingTerminalCommandApproval {
@@ -5155,9 +5705,11 @@ class _TerminalActivityDisclosure extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      for (var index = 0;
-                          index < activities.length;
-                          index++) ...[
+                      for (
+                        var index = 0;
+                        index < activities.length;
+                        index++
+                      ) ...[
                         if (index > 0) const Divider(height: 1, color: _border),
                         _TerminalActivityItem(activity: activities[index]),
                       ],
@@ -5171,11 +5723,19 @@ class _TerminalActivityDisclosure extends StatelessWidget {
   }
 }
 
+final _terminalCommandHighlightTheme = <String, TextStyle>{...atomOneDarkTheme}
+  ..['root'] = const TextStyle(
+    color: Color(0xFFC9D5E8),
+    backgroundColor: Colors.transparent,
+  )
+  ..['built_in'] = const TextStyle(
+    color: Color(0xFF61AFEF),
+    fontWeight: FontWeight.w600,
+  )
+  ..['variable'] = const TextStyle(color: Color(0xFFE5C07B));
+
 class _TerminalDisclosureArrow extends CustomPainter {
-  const _TerminalDisclosureArrow({
-    required this.expanded,
-    required this.color,
-  });
+  const _TerminalDisclosureArrow({required this.expanded, required this.color});
 
   final bool expanded;
   final Color color;
@@ -5271,13 +5831,7 @@ class _TerminalActivityItem extends StatelessWidget {
                   child: HighlightView(
                     activity.command,
                     language: 'bash',
-                    theme: {
-                      ...atomOneDarkTheme,
-                      'root': const TextStyle(
-                        color: _text,
-                        backgroundColor: Colors.transparent,
-                      ),
-                    },
+                    theme: _terminalCommandHighlightTheme,
                     padding: EdgeInsets.zero,
                     textStyle: const TextStyle(
                       fontFamily: 'monospace',
@@ -5367,8 +5921,8 @@ class _TerminalCommandApprovalCard extends StatelessWidget {
                   appText(
                     isRunning
                         ? automaticallyAllowed
-                            ? 'Running command (All allow)'
-                            : 'Running command'
+                              ? 'Running command (All allow)'
+                              : 'Running command'
                         : 'Allow this terminal command?',
                   ),
                   style: const TextStyle(
@@ -5406,13 +5960,7 @@ class _TerminalCommandApprovalCard extends StatelessWidget {
                   child: HighlightView(
                     request.command,
                     language: 'bash',
-                    theme: {
-                      ...atomOneDarkTheme,
-                      'root': const TextStyle(
-                        color: _text,
-                        backgroundColor: Colors.transparent,
-                      ),
-                    },
+                    theme: _terminalCommandHighlightTheme,
                     padding: EdgeInsets.zero,
                     textStyle: const TextStyle(
                       fontFamily: 'monospace',
@@ -5542,10 +6090,7 @@ class _ThinkingIndicator extends StatelessWidget {
 }
 
 class _AnimatedEmojiMessage extends StatelessWidget {
-  const _AnimatedEmojiMessage({
-    super.key,
-    required this.emoji,
-  });
+  const _AnimatedEmojiMessage({super.key, required this.emoji});
 
   final String emoji;
 
@@ -5561,10 +6106,7 @@ class _AnimatedEmojiMessage extends StatelessWidget {
           offset: Offset(0, -bounce * 9),
           child: Transform.rotate(
             angle: tilt,
-            child: Transform.scale(
-              scale: 1 + bounce * 0.08,
-              child: child,
-            ),
+            child: Transform.scale(scale: 1 + bounce * 0.08, child: child),
           ),
         );
       },
@@ -5591,6 +6133,7 @@ class _MessageRow extends StatefulWidget {
     required this.onDelete,
     required this.deleteEnabled,
     required this.onEditMessage,
+    required this.onProactiveModeChanged,
     required this.editEnabled,
     this.branch,
     required this.onActivateBranch,
@@ -5603,11 +6146,13 @@ class _MessageRow extends StatefulWidget {
     this.feedbackRating,
     this.reaction,
     required this.feedbackEnabled,
+    required this.reactionEnabled,
     required this.onSetFeedback,
     required this.onSetReaction,
     required this.isSpeechPlaying,
     required this.isSpeechLoading,
     required this.onToggleSpeech,
+    required this.onShowSearchResults,
   });
 
   final ChatMessage message;
@@ -5621,7 +6166,9 @@ class _MessageRow extends StatefulWidget {
     String content,
     List<ChatAttachment> attachments,
     bool allowAiReply,
-  ) onEditMessage;
+  )
+  onEditMessage;
+  final ValueChanged<bool> onProactiveModeChanged;
   final bool editEnabled;
   final MessageBranchNavigation? branch;
   final ValueChanged<String> onActivateBranch;
@@ -5634,17 +6181,23 @@ class _MessageRow extends StatefulWidget {
   final int? feedbackRating;
   final String? reaction;
   final bool feedbackEnabled;
+  final bool reactionEnabled;
   final void Function(
-          String userMessageId, String responseMessageId, int? rating)
-      onSetFeedback;
+    String userMessageId,
+    String responseMessageId,
+    int? rating,
+  )
+  onSetFeedback;
   final void Function(
     String userMessageId,
     String responseMessageId,
     String? reaction,
-  ) onSetReaction;
+  )
+  onSetReaction;
   final bool isSpeechPlaying;
   final bool isSpeechLoading;
   final VoidCallback onToggleSpeech;
+  final VoidCallback onShowSearchResults;
 
   @override
   State<_MessageRow> createState() => _MessageRowState();
@@ -5655,7 +6208,7 @@ class _MessageRowState extends State<_MessageRow> {
   bool _isHovered = false;
   bool _isEditing = false;
   bool _terminalActivityExpanded = false;
-  bool _unwindMode = false;
+  bool _ventMode = false;
   bool _isPickingEditAttachments = false;
   final _editController = _EmojiAwareTextEditingController();
   final List<ChatAttachment> _editAttachments = [];
@@ -5674,10 +6227,6 @@ class _MessageRowState extends State<_MessageRow> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.isActiveReply && !widget.isActiveReply) {
       _terminalActivityExpanded = false;
-    } else if (widget.isActiveReply &&
-        widget.terminalActivities.isNotEmpty &&
-        oldWidget.terminalActivities.isEmpty) {
-      _terminalActivityExpanded = true;
     }
     if (oldWidget.message.content != widget.message.content) {
       _linkPreviews.clear();
@@ -5699,9 +6248,10 @@ class _MessageRowState extends State<_MessageRow> {
     _editAttachments
       ..clear()
       ..addAll(widget.attachments);
+    widget.onProactiveModeChanged(false);
     setState(() {
       _isEditing = true;
-      _unwindMode = false;
+      _ventMode = false;
     });
   }
 
@@ -5731,22 +6281,26 @@ class _MessageRowState extends State<_MessageRow> {
         if (isSensitiveAttachmentPath(filePath)) {
           _showToast(
             context,
-            appText('Sensitive file cannot be uploaded: {name}.',
-                values: {'name': file.name}),
+            appText(
+              'Sensitive file cannot be uploaded: {name}.',
+              values: {'name': file.name},
+            ),
             isError: true,
           );
           continue;
         }
-        added.add(ChatAttachment(
-          id: _uuid.v4(),
-          path: filePath,
-          name: path.basename(filePath),
-          mimeType: attachmentMimeType(filePath),
-          expiresAtUtc: DateTime.now()
-              .toUtc()
-              .add(const Duration(hours: 24))
-              .millisecondsSinceEpoch,
-        ));
+        added.add(
+          ChatAttachment(
+            id: _uuid.v4(),
+            path: filePath,
+            name: path.basename(filePath),
+            mimeType: attachmentMimeType(filePath),
+            expiresAtUtc: DateTime.now()
+                .toUtc()
+                .add(const Duration(hours: 24))
+                .millisecondsSinceEpoch,
+          ),
+        );
       }
       if (added.isNotEmpty) {
         setState(() => _editAttachments.addAll(added));
@@ -5778,7 +6332,7 @@ class _MessageRowState extends State<_MessageRow> {
       widget.message.id,
       text,
       List<ChatAttachment>.unmodifiable(_editAttachments),
-      !_unwindMode,
+      !_ventMode,
     );
     if (mounted) setState(() => _isEditing = false);
   }
@@ -5796,7 +6350,8 @@ class _MessageRowState extends State<_MessageRow> {
             child: _AttachmentGrid(
               attachments: _editAttachments,
               onRemove: (id) => setState(
-                  () => _editAttachments.removeWhere((item) => item.id == id)),
+                () => _editAttachments.removeWhere((item) => item.id == id),
+              ),
               onPreview: (attachment) =>
                   _openAttachmentPreview(context, attachment),
               compact: true,
@@ -5823,7 +6378,10 @@ class _MessageRowState extends State<_MessageRow> {
             isDense: true,
             contentPadding: EdgeInsets.zero,
           ),
-          onChanged: (_) => setState(() {}),
+          onChanged: (_) {
+            setState(() {});
+            widget.onProactiveModeChanged(!_ventMode);
+          },
           onSubmitted: (_) {
             if (_editController.text.trim().isNotEmpty ||
                 _editAttachments.isNotEmpty) {
@@ -5837,8 +6395,9 @@ class _MessageRowState extends State<_MessageRow> {
             IconButton(
               key: ValueKey('edit-attachment-${widget.message.id}'),
               tooltip: appText('Add attachment'),
-              onPressed:
-                  _isPickingEditAttachments ? null : _pickEditAttachments,
+              onPressed: _isPickingEditAttachments
+                  ? null
+                  : _pickEditAttachments,
               icon: _isPickingEditAttachments
                   ? const SizedBox(
                       width: 18,
@@ -5853,11 +6412,14 @@ class _MessageRowState extends State<_MessageRow> {
             const SizedBox(width: 4),
             _ComposerMode(
               key: ValueKey('edit-mode-${widget.message.id}'),
-              icon:
-                  _unwindMode ? LucideIcons300.volume2 : LucideIcons300.volumeX,
-              label: appText(_unwindMode ? 'Unwind' : 'Vent'),
-              selected: _unwindMode,
-              onTap: () => setState(() => _unwindMode = !_unwindMode),
+              icon: LucideIcons300.volumeX,
+              label: appText('Vent'),
+              selected: _ventMode,
+              onTap: () {
+                final newMode = !_ventMode;
+                setState(() => _ventMode = newMode);
+                widget.onProactiveModeChanged(!newMode);
+              },
             ),
             const Spacer(),
             TextButton(
@@ -5897,10 +6459,7 @@ class _MessageRowState extends State<_MessageRow> {
       if (!mounted) return;
       _showToast(
         context,
-        appText(
-          'Unable to copy message: {error}',
-          values: {'error': error},
-        ),
+        appText('Unable to copy message: {error}', values: {'error': error}),
         isError: true,
       );
     }
@@ -5909,9 +6468,20 @@ class _MessageRowState extends State<_MessageRow> {
   @override
   Widget build(BuildContext context) {
     final message = widget.message;
-    final emojiOnlyMessage =
-        widget.attachments.isEmpty ? _singleEmoji(message.content) : null;
-    final waitingForTerminalReply = message.role == 'model' &&
+    final resultSources = message.role == 'model'
+        ? _messageResultSources(message.content)
+        : const <_SearchResultSource>[];
+    final messageWebUris = _messageWebUris(message.content);
+    final hasSearchResultsButton = resultSources.length >= 2;
+    final showInlineUrlPreview = messageWebUris.length == 1;
+    final displayContent = hasSearchResultsButton
+        ? _messageContentWithoutSearchSources(message.content)
+        : message.content;
+    final emojiOnlyMessage = widget.attachments.isEmpty
+        ? _singleEmoji(message.content)
+        : null;
+    final waitingForTerminalReply =
+        message.role == 'model' &&
         message.content.trim().isEmpty &&
         widget.attachments.isEmpty &&
         widget.terminalActivities.isNotEmpty;
@@ -5954,15 +6524,18 @@ class _MessageRowState extends State<_MessageRow> {
                             if (!_isEditing &&
                                 widget.attachments.isNotEmpty) ...[
                               ConstrainedBox(
-                                constraints:
-                                    const BoxConstraints(maxWidth: 480),
+                                constraints: const BoxConstraints(
+                                  maxWidth: 480,
+                                ),
                                 child: KeyedSubtree(
                                   key: const ValueKey('sent-attachment-grid'),
                                   child: _AttachmentGrid(
                                     attachments: widget.attachments,
                                     onPreview: (attachment) =>
                                         _openAttachmentPreview(
-                                            context, attachment),
+                                          context,
+                                          attachment,
+                                        ),
                                   ),
                                 ),
                               ),
@@ -5971,8 +6544,9 @@ class _MessageRowState extends State<_MessageRow> {
                             ],
                             if (message.content.isNotEmpty)
                               ConstrainedBox(
-                                constraints:
-                                    const BoxConstraints(maxWidth: 640),
+                                constraints: const BoxConstraints(
+                                  maxWidth: 640,
+                                ),
                                 child: AnimatedContainer(
                                   key: const ValueKey('user-message-bubble'),
                                   duration: const Duration(milliseconds: 140),
@@ -5995,33 +6569,33 @@ class _MessageRowState extends State<_MessageRow> {
                                       color: _isEditing
                                           ? _accent
                                           : _isHovered
-                                              ? const Color(0xFF596A86)
-                                              : const Color(0xFF3B4351),
+                                          ? const Color(0xFF596A86)
+                                          : const Color(0xFF3B4351),
                                     ),
                                     borderRadius: BorderRadius.circular(17),
                                   ),
                                   child: _isEditing
                                       ? _buildInlineEditor(context)
                                       : emojiOnlyMessage != null
-                                          ? _AnimatedEmojiMessage(
-                                              key: ValueKey(
-                                                'animated-emoji-${message.id}',
-                                              ),
-                                              emoji: emojiOnlyMessage,
-                                            )
-                                          : MarkdownBody(
-                                              data: message.content,
-                                              selectable: true,
-                                              inlineSyntaxes: [
-                                                _EmojiMarkdownSyntax(),
-                                              ],
-                                              builders: {
-                                                'pre': _CodeBlockBuilder(),
-                                                'saraEmoji':
-                                                    _MarkdownEmojiBuilder(),
-                                              },
-                                              styleSheet:
-                                                  MarkdownStyleSheet.fromTheme(
+                                      ? _AnimatedEmojiMessage(
+                                          key: ValueKey(
+                                            'animated-emoji-${message.id}',
+                                          ),
+                                          emoji: emojiOnlyMessage,
+                                        )
+                                      : MarkdownBody(
+                                          data: message.content,
+                                          selectable: true,
+                                          inlineSyntaxes: [
+                                            _EmojiMarkdownSyntax(),
+                                          ],
+                                          builders: {
+                                            'pre': _CodeBlockBuilder(),
+                                            'saraEmoji':
+                                                _MarkdownEmojiBuilder(),
+                                          },
+                                          styleSheet:
+                                              MarkdownStyleSheet.fromTheme(
                                                 Theme.of(context),
                                               ).copyWith(
                                                 p: const TextStyle(
@@ -6047,8 +6621,9 @@ class _MessageRowState extends State<_MessageRow> {
                                                 ),
                                                 code: const TextStyle(
                                                   color: _text,
-                                                  backgroundColor:
-                                                      Color(0xFF343A46),
+                                                  backgroundColor: Color(
+                                                    0xFF343A46,
+                                                  ),
                                                   fontFamily: 'monospace',
                                                   fontSize: 13,
                                                 ),
@@ -6056,15 +6631,17 @@ class _MessageRowState extends State<_MessageRow> {
                                                     const BoxDecoration(),
                                                 blockquoteDecoration:
                                                     const BoxDecoration(
-                                                  border: Border(
-                                                    left: BorderSide(
-                                                      color: Color(0xFF596273),
-                                                      width: 3,
+                                                      border: Border(
+                                                        left: BorderSide(
+                                                          color: Color(
+                                                            0xFF596273,
+                                                          ),
+                                                          width: 3,
+                                                        ),
+                                                      ),
                                                     ),
-                                                  ),
-                                                ),
                                               ),
-                                            ),
+                                        ),
                                 ),
                               ),
                             AnimatedSize(
@@ -6074,13 +6651,15 @@ class _MessageRowState extends State<_MessageRow> {
                               child: _isHovered && !_isEditing
                                   ? Container(
                                       key: const ValueKey(
-                                          'user-message-actions'),
+                                        'user-message-actions',
+                                      ),
                                       child: Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
                                           IconButton(
                                             key: ValueKey(
-                                                'delete-${message.id}'),
+                                              'delete-${message.id}',
+                                            ),
                                             tooltip: appText('Delete'),
                                             onPressed: widget.deleteEnabled
                                                 ? widget.onDelete
@@ -6089,30 +6668,37 @@ class _MessageRowState extends State<_MessageRow> {
                                               LucideIcons300.trash2,
                                               size: 20,
                                             ),
-                                            color: _muted,
+                                            color: const Color(0xFFFF8585),
                                             visualDensity:
                                                 VisualDensity.compact,
                                             constraints:
                                                 const BoxConstraints.tightFor(
-                                              width: 32,
-                                              height: 32,
-                                            ),
+                                                  width: 32,
+                                                  height: 32,
+                                                ),
                                             style: IconButton.styleFrom(
                                               backgroundColor:
                                                   Colors.transparent,
-                                              foregroundColor: _muted,
-                                              hoverColor:
-                                                  const Color(0x22343A46),
+                                              foregroundColor: const Color(
+                                                0xFFFF8585,
+                                              ),
+                                              hoverColor: const Color(
+                                                0x22343A46,
+                                              ),
                                               disabledForegroundColor:
-                                                  _muted.withValues(alpha: .5),
+                                                  const Color(
+                                                    0xFFFF8585,
+                                                  ).withValues(alpha: .5),
                                             ),
                                             padding: EdgeInsets.zero,
                                           ),
                                           IconButton(
                                             key: ValueKey(
-                                                'copy-user-${message.id}'),
+                                              'copy-user-${message.id}',
+                                            ),
                                             tooltip: appText(
-                                                _isCopied ? 'Copied' : 'Copy'),
+                                              _isCopied ? 'Copied' : 'Copy',
+                                            ),
                                             onPressed: _copyMessage,
                                             icon: Icon(
                                               _isCopied
@@ -6125,15 +6711,16 @@ class _MessageRowState extends State<_MessageRow> {
                                                 VisualDensity.compact,
                                             constraints:
                                                 const BoxConstraints.tightFor(
-                                              width: 32,
-                                              height: 32,
-                                            ),
+                                                  width: 32,
+                                                  height: 32,
+                                                ),
                                             style: IconButton.styleFrom(
                                               backgroundColor:
                                                   Colors.transparent,
                                               foregroundColor: _muted,
-                                              hoverColor:
-                                                  const Color(0x22343A46),
+                                              hoverColor: const Color(
+                                                0x22343A46,
+                                              ),
                                             ),
                                             padding: EdgeInsets.zero,
                                           ),
@@ -6152,15 +6739,16 @@ class _MessageRowState extends State<_MessageRow> {
                                                 VisualDensity.compact,
                                             constraints:
                                                 const BoxConstraints.tightFor(
-                                              width: 32,
-                                              height: 32,
-                                            ),
+                                                  width: 32,
+                                                  height: 32,
+                                                ),
                                             style: IconButton.styleFrom(
                                               backgroundColor:
                                                   Colors.transparent,
                                               foregroundColor: _muted,
-                                              hoverColor:
-                                                  const Color(0x22343A46),
+                                              hoverColor: const Color(
+                                                0x22343A46,
+                                              ),
                                             ),
                                             padding: EdgeInsets.zero,
                                           ),
@@ -6168,26 +6756,29 @@ class _MessageRowState extends State<_MessageRow> {
                                             const SizedBox(width: 2),
                                             _BranchNavigationButton(
                                               key: ValueKey(
-                                                  'branch-user-previous-${message.id}'),
+                                                'branch-user-previous-${message.id}',
+                                              ),
                                               direction:
                                                   _BranchArrowDirection.left,
-                                              tooltip:
-                                                  appText('Previous response'),
+                                              tooltip: appText(
+                                                'Previous response',
+                                              ),
                                               onPressed:
                                                   widget.branch!.activeIndex > 0
-                                                      ? () => widget
-                                                              .onActivateBranch(
-                                                            widget.branch!
-                                                                .alternatives[widget
-                                                                    .branch!
-                                                                    .activeIndex -
-                                                                1],
-                                                          )
-                                                      : null,
+                                                  ? () => widget.onActivateBranch(
+                                                      widget
+                                                          .branch!
+                                                          .alternatives[widget
+                                                              .branch!
+                                                              .activeIndex -
+                                                          1],
+                                                    )
+                                                  : null,
                                             ),
                                             SizedBox(
                                               key: ValueKey(
-                                                  'branch-user-position-${message.id}'),
+                                                'branch-user-position-${message.id}',
+                                              ),
                                               width: 28,
                                               height: 30,
                                               child: Center(
@@ -6203,23 +6794,26 @@ class _MessageRowState extends State<_MessageRow> {
                                             ),
                                             _BranchNavigationButton(
                                               key: ValueKey(
-                                                  'branch-user-next-${message.id}'),
+                                                'branch-user-next-${message.id}',
+                                              ),
                                               direction:
                                                   _BranchArrowDirection.right,
                                               tooltip: appText('Next response'),
-                                              onPressed: widget.branch!
-                                                              .activeIndex +
+                                              onPressed:
+                                                  widget.branch!.activeIndex +
                                                           1 <
-                                                      widget.branch!
-                                                          .alternatives.length
-                                                  ? () =>
-                                                      widget.onActivateBranch(
-                                                        widget.branch!
-                                                            .alternatives[widget
-                                                                .branch!
-                                                                .activeIndex +
-                                                            1],
-                                                      )
+                                                      widget
+                                                          .branch!
+                                                          .alternatives
+                                                          .length
+                                                  ? () => widget.onActivateBranch(
+                                                      widget
+                                                          .branch!
+                                                          .alternatives[widget
+                                                              .branch!
+                                                              .activeIndex +
+                                                          1],
+                                                    )
                                                   : null,
                                             ),
                                           ],
@@ -6228,7 +6822,8 @@ class _MessageRowState extends State<_MessageRow> {
                                     )
                                   : const SizedBox(
                                       key: ValueKey(
-                                          'user-message-actions-hidden'),
+                                        'user-message-actions-hidden',
+                                      ),
                                     ),
                             ),
                           ],
@@ -6247,6 +6842,20 @@ class _MessageRowState extends State<_MessageRow> {
                       style: const TextStyle(
                         color: Color(0xFFFF8585),
                         fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+                if (widget.terminalActivities.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 520),
+                    child: _TerminalActivityDisclosure(
+                      activities: widget.terminalActivities,
+                      expanded: _terminalActivityExpanded,
+                      onToggle: () => setState(
+                        () => _terminalActivityExpanded =
+                            !_terminalActivityExpanded,
                       ),
                     ),
                   ),
@@ -6297,31 +6906,82 @@ class _MessageRowState extends State<_MessageRow> {
                     )
                   : MarkdownBody(
                       key: ValueKey('assistant-message-content-${message.id}'),
-                      data: message.content,
+                      data: displayContent,
                       selectable: true,
+                      onTapLink: (text, href, title) {
+                        unawaited(_openExternalLink(href));
+                      },
                       inlineSyntaxes: [_EmojiMarkdownSyntax()],
                       builders: {
                         'pre': _CodeBlockBuilder(),
                         'saraEmoji': _MarkdownEmojiBuilder(),
                       },
-                      styleSheet: MarkdownStyleSheet.fromTheme(
-                        Theme.of(context),
-                      ).copyWith(
-                        p: const TextStyle(
-                          color: _text,
-                          fontSize: 14,
-                          height: 1.75,
+                      styleSheet:
+                          MarkdownStyleSheet.fromTheme(
+                            Theme.of(context),
+                          ).copyWith(
+                            p: const TextStyle(
+                              color: _text,
+                              fontSize: 14,
+                              height: 1.75,
+                            ),
+                            code: const TextStyle(
+                              color: _text,
+                              backgroundColor: _surfaceRaised,
+                              fontFamily: 'monospace',
+                              fontSize: 13,
+                            ),
+                            codeblockDecoration: const BoxDecoration(),
+                          ),
+                    ),
+            if (hasSearchResultsButton)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Material(
+                    key: ValueKey(
+                      'search-results-button-surface-${message.id}',
+                    ),
+                    color: Colors.transparent,
+                    shape: const StadiumBorder(
+                      side: BorderSide(color: _border),
+                    ),
+                    child: InkWell(
+                      key: ValueKey('search-results-button-${message.id}'),
+                      borderRadius: BorderRadius.circular(22),
+                      onTap: widget.onShowSearchResults,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 11,
+                          vertical: 6,
                         ),
-                        code: const TextStyle(
-                          color: _text,
-                          backgroundColor: _surfaceRaised,
-                          fontFamily: 'monospace',
-                          fontSize: 13,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _StackedWebsiteIcons(
+                              sources: resultSources.take(4).toList(),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              appText(
+                                '{count} web pages',
+                                values: {'count': resultSources.length},
+                              ),
+                              style: const TextStyle(
+                                color: _text,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
                         ),
-                        codeblockDecoration: const BoxDecoration(),
                       ),
                     ),
-            ..._buildLinkPreviews(message.content),
+                  ),
+                ),
+              ),
+            if (showInlineUrlPreview) ..._buildLinkPreviews(displayContent),
             if (!waitingForTerminalReply) ...[
               const SizedBox(height: 4),
               Row(
@@ -6333,9 +6993,10 @@ class _MessageRowState extends State<_MessageRow> {
                       tooltip: appText('Previous response'),
                       onPressed: widget.branch!.activeIndex > 0
                           ? () => widget.onActivateBranch(
-                                widget.branch!.alternatives[
-                                    widget.branch!.activeIndex - 1],
-                              )
+                              widget
+                                  .branch!
+                                  .alternatives[widget.branch!.activeIndex - 1],
+                            )
                           : null,
                     ),
                     SizedBox(
@@ -6357,19 +7018,22 @@ class _MessageRowState extends State<_MessageRow> {
                       key: ValueKey('branch-next-${message.id}'),
                       direction: _BranchArrowDirection.right,
                       tooltip: appText('Next response'),
-                      onPressed: widget.branch!.activeIndex + 1 <
+                      onPressed:
+                          widget.branch!.activeIndex + 1 <
                               widget.branch!.alternatives.length
                           ? () => widget.onActivateBranch(
-                                widget.branch!.alternatives[
-                                    widget.branch!.activeIndex + 1],
-                              )
+                              widget
+                                  .branch!
+                                  .alternatives[widget.branch!.activeIndex + 1],
+                            )
                           : null,
                     ),
                     const SizedBox(width: 4),
                   ],
                   _IconButton(
-                    icon:
-                        _isCopied ? LucideIcons300.check : LucideIcons300.copy,
+                    icon: _isCopied
+                        ? LucideIcons300.check
+                        : LucideIcons300.copy,
                     tooltip: appText(_isCopied ? 'Copied' : 'Copy'),
                     onPressed: _copyMessage,
                     size: 18,
@@ -6378,13 +7042,15 @@ class _MessageRowState extends State<_MessageRow> {
                   _IconButton(
                     key: ValueKey('like-${message.id}'),
                     icon: LucideIcons300.thumbsUp,
-                    tooltip:
-                        appText(widget.feedbackRating == 1 ? 'Liked' : 'Like'),
+                    tooltip: appText(
+                      widget.feedbackRating == 1 ? 'Liked' : 'Like',
+                    ),
                     color: widget.feedbackRating == 1
                         ? const Color(0xFFB5BAC4)
                         : _muted,
-                    selectedFill:
-                        widget.feedbackRating == 1 ? _FeedbackThumb.up : null,
+                    selectedFill: widget.feedbackRating == 1
+                        ? _FeedbackThumb.up
+                        : null,
                     onPressed: _feedbackAction(1),
                     size: 18,
                   ),
@@ -6393,7 +7059,8 @@ class _MessageRowState extends State<_MessageRow> {
                     key: ValueKey('dislike-${message.id}'),
                     icon: LucideIcons300.thumbsDown,
                     tooltip: appText(
-                        widget.feedbackRating == -1 ? 'Disliked' : 'Dislike'),
+                      widget.feedbackRating == -1 ? 'Disliked' : 'Dislike',
+                    ),
                     color: widget.feedbackRating == -1
                         ? const Color(0xFFB5BAC4)
                         : _muted,
@@ -6407,7 +7074,8 @@ class _MessageRowState extends State<_MessageRow> {
                   _AssistantReactionControl(
                     key: ValueKey('reaction-${message.id}'),
                     reaction: widget.reaction,
-                    enabled: widget.feedbackEnabled &&
+                    enabled:
+                        widget.reactionEnabled &&
                         widget.feedbackUserMessageId != null,
                     onSelected: (reaction) {
                       final userMessageId = widget.feedbackUserMessageId;
@@ -6429,8 +7097,8 @@ class _MessageRowState extends State<_MessageRow> {
                       widget.isSpeechPlaying
                           ? 'Stop speech'
                           : widget.isSpeechLoading
-                              ? 'Preparing speech'
-                              : 'Speech',
+                          ? 'Preparing speech'
+                          : 'Speech',
                     ),
                     onPressed: message.content.trim().isEmpty
                         ? null
@@ -6447,8 +7115,9 @@ class _MessageRowState extends State<_MessageRow> {
                     key: ValueKey('regenerate-${message.id}'),
                     icon: LucideIcons300.refreshCw,
                     tooltip: appText('Regenerate'),
-                    onPressed:
-                        widget.regenerateEnabled ? widget.onRegenerate : null,
+                    onPressed: widget.regenerateEnabled
+                        ? widget.onRegenerate
+                        : null,
                     size: 19,
                   ),
                 ],
@@ -6464,35 +7133,21 @@ class _MessageRowState extends State<_MessageRow> {
     final userMessageId = widget.feedbackUserMessageId;
     if (!widget.feedbackEnabled || userMessageId == null) return null;
     return () => widget.onSetFeedback(
-          userMessageId,
-          widget.message.id,
-          widget.feedbackRating == rating ? null : rating,
-        );
+      userMessageId,
+      widget.message.id,
+      widget.feedbackRating == rating ? null : rating,
+    );
   }
 
   List<Widget> _buildLinkPreviews(String content) {
-    final plainText = content
-        .replaceAll(RegExp(r'```[\s\S]*?```'), '')
-        .replaceAll(RegExp(r'`[^`]*`'), '');
-    final links = RegExp(r'https?://[^\s<>()\]]+')
-        .allMatches(plainText)
-        .map(
-            (match) => match.group(0)!.replaceFirst(RegExp(r'[.,!?;:"]+$'), ''))
-        .toSet()
-        .where((link) {
-      final uri = Uri.tryParse(link);
-      return uri != null &&
-          (uri.scheme == 'http' || uri.scheme == 'https') &&
-          uri.hasAuthority &&
-          uri.host.isNotEmpty &&
-          uri.userInfo.isEmpty;
-    }).take(5);
+    final links = _messageWebUris(content).take(5);
     return [
-      for (final link in links)
+      for (final uri in links)
         FutureBuilder<LinkPreview?>(
+          key: ValueKey('link-preview-request-$uri'),
           future: _linkPreviews.putIfAbsent(
-            link,
-            () => _linkPreviewService.load(Uri.parse(link)),
+            uri.toString(),
+            () => _linkPreviewService.load(uri),
           ),
           builder: (context, snapshot) {
             if (snapshot.hasError || !snapshot.hasData) {
@@ -6516,6 +7171,351 @@ class _MessageRowState extends State<_MessageRow> {
         ),
     ];
   }
+
+  Future<void> _openExternalLink(String? href) async {
+    final uri = href == null ? null : Uri.tryParse(href);
+    if (uri == null ||
+        (uri.scheme != 'https' && uri.scheme != 'http') ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty) {
+      return;
+    }
+    try {
+      final result = await Process.run('xdg-open', [uri.toString()]);
+      if (result.exitCode != 0) {
+        throw ProcessException(
+          'xdg-open',
+          [uri.toString()],
+          result.stderr.toString(),
+          result.exitCode,
+        );
+      }
+    } catch (error) {
+      if (!mounted) return;
+      _showToast(
+        context,
+        appText('Could not open link: {error}', values: {'error': error}),
+        isError: true,
+      );
+    }
+  }
+}
+
+class _WebsiteBadge extends StatefulWidget {
+  const _WebsiteBadge({
+    required this.uri,
+    required this.size,
+    required this.outlineColor,
+    this.faviconBytes,
+    this.loadFavicon = true,
+  });
+
+  final Uri uri;
+  final double size;
+  final Color outlineColor;
+  final Uint8List? faviconBytes;
+  final bool loadFavicon;
+
+  @override
+  State<_WebsiteBadge> createState() => _WebsiteBadgeState();
+}
+
+class _WebsiteBadgeState extends State<_WebsiteBadge> {
+  late Future<Uint8List?> _faviconFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _faviconFuture = _loadFavicon();
+  }
+
+  @override
+  void didUpdateWidget(covariant _WebsiteBadge oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.uri != widget.uri ||
+        oldWidget.faviconBytes != widget.faviconBytes) {
+      _faviconFuture = _loadFavicon();
+    }
+  }
+
+  Future<Uint8List?> _loadFavicon() async {
+    final bytes =
+        widget.faviconBytes ??
+        (widget.loadFavicon
+            ? await LinkPreviewService().loadFavicon(widget.uri)
+            : null);
+    if (bytes == null) return null;
+    final decoded = img.decodeImage(bytes);
+    if (decoded == null) return bytes;
+    final resized = img.copyResize(decoded, width: 32, height: 32);
+    return Uint8List.fromList(img.encodePng(resized));
+  }
+
+  Widget _initial(String host) {
+    return Text(
+      host.isEmpty ? 'W' : host[0].toUpperCase(),
+      style: TextStyle(
+        color: Colors.white,
+        fontSize: widget.size * 0.48,
+        fontWeight: FontWeight.w600,
+        height: 1,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final host = widget.uri.host.replaceFirst(RegExp(r'^www\.'), '');
+    return FutureBuilder<Uint8List?>(
+      future: _faviconFuture,
+      builder: (context, snapshot) {
+        final bytes = snapshot.data;
+        return Container(
+          key: ValueKey('website-badge-${widget.uri}'),
+          width: widget.size,
+          height: widget.size,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: _surfaceRaised,
+            shape: BoxShape.circle,
+            border: Border.all(color: widget.outlineColor, width: 1.5),
+          ),
+          child: bytes == null
+              ? _initial(host)
+              : ClipOval(
+                  child: Image.memory(
+                    bytes,
+                    width: widget.size,
+                    height: widget.size,
+                    fit: BoxFit.cover,
+                    cacheWidth: widget.size.round() * 2,
+                    cacheHeight: widget.size.round() * 2,
+                    errorBuilder: (context, error, stackTrace) =>
+                        _initial(host),
+                  ),
+                ),
+        );
+      },
+    );
+  }
+}
+
+class _StackedWebsiteIcons extends StatelessWidget {
+  const _StackedWebsiteIcons({required this.sources});
+
+  final List<_SearchResultSource> sources;
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleSources = sources.take(4).toList(growable: false);
+    final width = visibleSources.isEmpty
+        ? 20.0
+        : 20.0 + (visibleSources.length - 1) * 11.0;
+    return SizedBox(
+      width: width,
+      height: 20,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          for (var index = 0; index < visibleSources.length; index++)
+            Positioned(
+              left: index * 11,
+              child: _WebsiteBadge(
+                uri: visibleSources[index].uri,
+                size: 20,
+                outlineColor: _surfaceRaised,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SearchResultsPanel extends StatelessWidget {
+  const _SearchResultsPanel({
+    required this.sources,
+    required this.messageDate,
+    required this.onClose,
+    required this.onOpen,
+  });
+
+  final List<_SearchResultSource> sources;
+  final String messageDate;
+  final VoidCallback onClose;
+  final ValueChanged<String> onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const ValueKey('search-results-panel'),
+      decoration: const BoxDecoration(
+        color: _surface,
+        border: Border(left: BorderSide(color: _border)),
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 15, 8, 13),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    appText('Search results'),
+                    style: const TextStyle(
+                      color: _text,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  key: const ValueKey('close-search-results'),
+                  tooltip: appText('Close search results'),
+                  onPressed: onClose,
+                  icon: const Icon(LucideIcons300.x, size: 18),
+                  color: _muted,
+                  visualDensity: VisualDensity.compact,
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1, color: _border),
+          Expanded(
+            child: ListView.separated(
+              padding: const EdgeInsets.fromLTRB(18, 8, 18, 88),
+              itemCount: sources.length,
+              separatorBuilder: (context, index) => const SizedBox(height: 4),
+              itemBuilder: (context, index) => _SearchResultCard(
+                source: sources[index],
+                messageDate: messageDate,
+                onOpen: onOpen,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SearchResultCard extends StatefulWidget {
+  const _SearchResultCard({
+    required this.source,
+    required this.messageDate,
+    required this.onOpen,
+  });
+
+  final _SearchResultSource source;
+  final String messageDate;
+  final ValueChanged<String> onOpen;
+
+  @override
+  State<_SearchResultCard> createState() => _SearchResultCardState();
+}
+
+class _SearchResultCardState extends State<_SearchResultCard> {
+  late Future<LinkPreview?> _preview;
+
+  @override
+  void initState() {
+    super.initState();
+    _preview = LinkPreviewService().load(widget.source.uri);
+  }
+
+  @override
+  void didUpdateWidget(covariant _SearchResultCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.source.uri != widget.source.uri) {
+      _preview = LinkPreviewService().load(widget.source.uri);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<LinkPreview?>(
+      future: _preview,
+      builder: (context, snapshot) {
+        final preview = snapshot.data;
+        final pageTitle = preview?.title.trim();
+        final sourceTitle = widget.source.title.trim();
+        final title =
+            pageTitle != null &&
+                pageTitle.isNotEmpty &&
+                pageTitle != widget.source.uri.host
+            ? pageTitle
+            : sourceTitle.isNotEmpty && sourceTitle != widget.source.uri.host
+            ? sourceTitle
+            : widget.source.uri.toString();
+        final siteName = preview?.siteName?.trim();
+        final sourceLabel = siteName != null && siteName.isNotEmpty
+            ? siteName
+            : widget.source.uri.toString();
+        final description = preview?.description;
+        return Material(
+          color: Colors.transparent,
+          child: InkWell(
+            key: ValueKey('search-result-card-${widget.source.uri}'),
+            borderRadius: BorderRadius.circular(6),
+            onTap: () => widget.onOpen(widget.source.uri.toString()),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      _WebsiteBadge(
+                        uri: widget.source.uri,
+                        size: 19,
+                        outlineColor: _surface,
+                        faviconBytes: preview?.faviconBytes,
+                        loadFavicon: false,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          '$sourceLabel | ${widget.messageDate}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: _muted, fontSize: 11),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: _text,
+                      fontSize: 13,
+                      height: 1.45,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  if (description != null && description.isNotEmpty) ...[
+                    const SizedBox(height: 5),
+                    Text(
+                      description,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _muted,
+                        fontSize: 12,
+                        height: 1.5,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
 
 class _CodeBlockBuilder extends MarkdownElementBuilder {
@@ -6529,9 +7529,10 @@ class _CodeBlockBuilder extends MarkdownElementBuilder {
     TextStyle? preferredStyle,
     TextStyle? parentStyle,
   ) {
-    final code = element.children
-        ?.whereType<md.Element>()
-        .firstWhere((child) => child.tag == 'code', orElse: () => element);
+    final code = element.children?.whereType<md.Element>().firstWhere(
+      (child) => child.tag == 'code',
+      orElse: () => element,
+    );
     final languageClass = code?.attributes['class'] ?? '';
     final language = languageClass.startsWith('language-')
         ? languageClass.substring('language-'.length).toLowerCase()
@@ -6580,10 +7581,7 @@ class _CodeBlockState extends State<_CodeBlock> {
       if (!mounted) return;
       _showToast(
         context,
-        appText(
-          'Unable to copy code: {error}',
-          values: {'error': error},
-        ),
+        appText('Unable to copy code: {error}', values: {'error': error}),
         isError: true,
       );
     }
@@ -6605,6 +7603,7 @@ class _CodeBlockState extends State<_CodeBlock> {
             children: [
               Container(
                 key: const ValueKey('markdown-code-block'),
+                width: double.infinity,
                 height: height,
                 decoration: BoxDecoration(
                   color: const Color(0xFF1D2129),
@@ -6624,7 +7623,7 @@ class _CodeBlockState extends State<_CodeBlock> {
                         theme: {
                           ...atomOneDarkTheme,
                           'root': const TextStyle(
-                            color: _text,
+                            color: Color(0xFFC9D5E8),
                             backgroundColor: Colors.transparent,
                           ),
                         },
@@ -6659,7 +7658,9 @@ class _CodeBlockState extends State<_CodeBlock> {
                         onPressed: _copy,
                         visualDensity: VisualDensity.compact,
                         constraints: const BoxConstraints.tightFor(
-                            width: 32, height: 32),
+                          width: 32,
+                          height: 32,
+                        ),
                         padding: EdgeInsets.zero,
                         icon: Icon(
                           _isCopied
@@ -6790,10 +7791,12 @@ class _LinkPreviewCardState extends State<_LinkPreviewCard> {
       await player.open(Media(uri.toString()), play: false);
     } catch (error) {
       if (!mounted) return;
-      setState(() => _videoError = appText(
-            'Unable to play video preview: {error}',
-            values: {'error': error},
-          ));
+      setState(
+        () => _videoError = appText(
+          'Unable to play video preview: {error}',
+          values: {'error': error},
+        ),
+      );
     }
   }
 
@@ -6860,8 +7863,9 @@ class _LinkPreviewCardState extends State<_LinkPreviewCard> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final width = math.min(560.0, constraints.maxWidth);
-          final height =
-              (width / _mediaAspectRatio).clamp(240.0, 315.0).toDouble();
+          final height = (width / _mediaAspectRatio)
+              .clamp(240.0, 315.0)
+              .toDouble();
           return Container(
             key: const ValueKey('link-preview-rich-card'),
             width: width,
@@ -6914,7 +7918,9 @@ class _LinkPreviewCardState extends State<_LinkPreviewCard> {
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                              color: Colors.white, fontSize: 12),
+                            color: Colors.white,
+                            fontSize: 12,
+                          ),
                         ),
                       ],
                     ],
@@ -7039,6 +8045,7 @@ class _Composer extends StatefulWidget {
     required this.controller,
     required this.focusNode,
     required this.onSend,
+    required this.onModeChanged,
     required this.isWaitingForReply,
     required this.showInlineSettings,
     required this.onOpenSettings,
@@ -7061,7 +8068,9 @@ class _Composer extends StatefulWidget {
     String? text,
     List<ChatAttachment> attachments,
     bool allowAiReply,
-  ) onSend;
+  )
+  onSend;
+  final ValueChanged<bool> onModeChanged;
   final bool isWaitingForReply;
   final bool showInlineSettings;
   final VoidCallback onOpenSettings;
@@ -7082,7 +8091,7 @@ class _Composer extends StatefulWidget {
 }
 
 class _ComposerState extends State<_Composer> {
-  bool _unwindMode = false;
+  bool _ventMode = false;
   bool _isPastingClipboard = false;
   final List<ChatAttachment> _attachments = [];
   final _attachmentLink = LayerLink();
@@ -7097,7 +8106,9 @@ class _ComposerState extends State<_Composer> {
   }
 
   void _handleInputChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    widget.onModeChanged(!_ventMode);
   }
 
   Future<void> addDroppedFiles(List<DropItem> files) async {
@@ -7109,18 +8120,22 @@ class _ComposerState extends State<_Composer> {
         continue;
       }
       if (isSensitiveAttachmentPath(filePath)) {
-        _showAttachmentError(appText(
-          'Sensitive file cannot be uploaded: {name}.',
-          values: {'name': path.basename(filePath)},
-        ));
+        _showAttachmentError(
+          appText(
+            'Sensitive file cannot be uploaded: {name}.',
+            values: {'name': path.basename(filePath)},
+          ),
+        );
         continue;
       }
       final attachment = _attachmentFromPath(filePath);
       if (attachment == null) {
-        _showAttachmentError(appText(
-          'Unsupported file format: {name}.',
-          values: {'name': path.basename(filePath)},
-        ));
+        _showAttachmentError(
+          appText(
+            'Unsupported file format: {name}.',
+            values: {'name': path.basename(filePath)},
+          ),
+        );
         continue;
       }
       selected.add(attachment);
@@ -7130,8 +8145,10 @@ class _ComposerState extends State<_Composer> {
 
   void _appendAttachments(List<ChatAttachment> selected) {
     if (!mounted || selected.isEmpty) return;
-    final existingPaths =
-        _attachments.map((item) => item.path).whereType<String>().toSet();
+    final existingPaths = _attachments
+        .map((item) => item.path)
+        .whereType<String>()
+        .toSet();
     final additions = selected
         .where((item) => item.path != null && existingPaths.add(item.path!))
         .toList(growable: false);
@@ -7166,8 +8183,9 @@ class _ComposerState extends State<_Composer> {
           return;
         }
 
-        final imageBytes = await (widget.clipboardImageReader ??
-            _readClipboardImageFromSystem)();
+        final imageBytes =
+            await (widget.clipboardImageReader ??
+                _readClipboardImageFromSystem)();
         if (imageBytes != null) {
           final attachment = widget.clipboardImageSaver == null
               ? await _saveClipboardImage(imageBytes)
@@ -7236,10 +8254,12 @@ class _ComposerState extends State<_Composer> {
     } catch (error) {
       debugPrint('Could not read clipboard contents: $error');
       if (mounted) {
-        _showAttachmentError(appText(
-          'Could not read the clipboard: {error}',
-          values: {'error': error},
-        ));
+        _showAttachmentError(
+          appText(
+            'Could not read the clipboard: {error}',
+            values: {'error': error},
+          ),
+        );
       }
     } finally {
       _isPastingClipboard = false;
@@ -7415,9 +8435,7 @@ class _ComposerState extends State<_Composer> {
             targetAnchor: Alignment.topLeft,
             followerAnchor: Alignment.bottomLeft,
             offset: const Offset(0, -12),
-            child: _EmojiPicker(
-              onSelected: _insertEmoji,
-            ),
+            child: _EmojiPicker(onSelected: _insertEmoji),
           ),
         ],
       ),
@@ -7479,10 +8497,12 @@ class _ComposerState extends State<_Composer> {
           continue;
         }
         if (isSensitiveAttachmentPath(filePath)) {
-          _showAttachmentError(appText(
-            'Sensitive file cannot be uploaded: {name}.',
-            values: {'name': pickedFile.name},
-          ));
+          _showAttachmentError(
+            appText(
+              'Sensitive file cannot be uploaded: {name}.',
+              values: {'name': pickedFile.name},
+            ),
+          );
           continue;
         }
         final attachment = _attachmentFromPath(filePath);
@@ -7493,10 +8513,12 @@ class _ComposerState extends State<_Composer> {
           continue;
         }
         if (!File(filePath).existsSync()) {
-          _showAttachmentError(appText(
-            'File not found: {name}',
-            values: {'name': pickedFile.name},
-          ));
+          _showAttachmentError(
+            appText(
+              'File not found: {name}',
+              values: {'name': pickedFile.name},
+            ),
+          );
           continue;
         }
         selected.add(attachment);
@@ -7504,10 +8526,12 @@ class _ComposerState extends State<_Composer> {
       _appendAttachments(selected);
     } catch (error) {
       if (mounted) {
-        _showAttachmentError(appText(
-          'Could not select attachment: {error}',
-          values: {'error': error},
-        ));
+        _showAttachmentError(
+          appText(
+            'Could not select attachment: {error}',
+            values: {'error': error},
+          ),
+        );
       }
     }
   }
@@ -7529,10 +8553,12 @@ class _ComposerState extends State<_Composer> {
       if (mounted) _appendAttachments([attachment]);
     } catch (error) {
       if (mounted) {
-        _showAttachmentError(appText(
-          'Could not save camera photo: {error}',
-          values: {'error': error},
-        ));
+        _showAttachmentError(
+          appText(
+            'Could not save camera photo: {error}',
+            values: {'error': error},
+          ),
+        );
       }
     }
   }
@@ -7553,7 +8579,7 @@ class _ComposerState extends State<_Composer> {
     widget.onSend(
       text,
       List<ChatAttachment>.unmodifiable(_attachments),
-      !_unwindMode,
+      !_ventMode,
     );
     setState(_attachments.clear);
   }
@@ -7567,9 +8593,14 @@ class _ComposerState extends State<_Composer> {
         final canSubmit =
             widget.controller.text.trim().isNotEmpty || _attachments.isNotEmpty;
         return Padding(
-          padding:
-              EdgeInsets.fromLTRB(24, compact ? 4 : 10, 24, compact ? 6 : 14),
+          padding: EdgeInsets.fromLTRB(
+            24,
+            compact ? 4 : 10,
+            24,
+            compact ? 6 : 14,
+          ),
           child: Center(
+            heightFactor: 1,
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 760),
               child: Column(
@@ -7633,7 +8664,8 @@ class _ComposerState extends State<_Composer> {
                                   event.logicalKey == LogicalKeyboardKey.keyV &&
                                   (HardwareKeyboard.instance.isControlPressed ||
                                       HardwareKeyboard
-                                          .instance.isMetaPressed)) {
+                                          .instance
+                                          .isMetaPressed)) {
                                 unawaited(_pasteClipboardContent());
                                 return KeyEventResult.handled;
                               }
@@ -7749,24 +8781,20 @@ class _ComposerState extends State<_Composer> {
                               const SizedBox(width: 8),
                               _ComposerMode(
                                 key: const ValueKey('composer-mode-button'),
-                                icon: _unwindMode
-                                    ? LucideIcons300.volume2
-                                    : LucideIcons300.volumeX,
-                                label: appText(_unwindMode ? 'Unwind' : 'Vent'),
-                                selected: _unwindMode,
+                                icon: LucideIcons300.volumeX,
+                                label: appText('Vent'),
+                                selected: _ventMode,
                                 onTap: () {
-                                  setState(
-                                    () => _unwindMode = !_unwindMode,
-                                  );
+                                  final newMode = !_ventMode;
+                                  setState(() => _ventMode = newMode);
+                                  widget.onModeChanged(!newMode);
                                 },
                               ),
                               if (widget.showInlineSettings)
                                 IconButton(
                                   tooltip: appText('Settings'),
                                   onPressed: widget.onOpenSettings,
-                                  icon: const Icon(
-                                    LucideIcons300.settings,
-                                  ),
+                                  icon: const Icon(LucideIcons300.settings),
                                   color: _muted,
                                   visualDensity: VisualDensity.compact,
                                   constraints: const BoxConstraints.tightFor(
@@ -7880,11 +8908,7 @@ class _ComposerMode extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  icon,
-                  size: 18,
-                  color: selected ? _accent : _text,
-                ),
+                Icon(icon, size: 18, color: selected ? _accent : _text),
                 const SizedBox(width: 6),
                 Text(
                   label,
@@ -7904,24 +8928,19 @@ class _ComposerMode extends StatelessWidget {
 }
 
 class _EmojiChoice {
-  const _EmojiChoice(this.emoji, this.category);
+  const _EmojiChoice(this.emoji);
 
   final emoji_picker.Emoji emoji;
-  final String category;
 
   String get characters => emoji.emoji;
 }
 
 final _emojiChoices = emojiSetEnglish
-    .expand((group) => group.emoji.map(
-          (item) => _EmojiChoice(item, group.category.name),
-        ))
+    .expand((group) => group.emoji.map((item) => _EmojiChoice(item)))
     .toList(growable: false);
 
 class _EmojiPicker extends StatefulWidget {
-  const _EmojiPicker({
-    required this.onSelected,
-  });
+  const _EmojiPicker({required this.onSelected});
 
   final ValueChanged<String> onSelected;
 
@@ -7930,32 +8949,19 @@ class _EmojiPicker extends StatefulWidget {
 }
 
 class _EmojiPickerState extends State<_EmojiPicker> {
-  static const _categories = [
-    ('All', 'All'),
-    ('SMILEYS', 'Faces'),
-    ('ANIMALS', 'Animals & nature'),
-    ('FOODS', 'Food & drink'),
-    ('ACTIVITIES', 'Activities'),
-    ('TRAVEL', 'Travel & places'),
-    ('OBJECTS', 'Objects'),
-    ('SYMBOLS', 'Symbols'),
-    ('FLAGS', 'Flags'),
-  ];
-
-  String _category = 'All';
   String _query = '';
 
   List<_EmojiChoice> get _filteredChoices {
     final query = _query.trim().toLowerCase();
     return _emojiChoices
-        .where((choice) =>
-            (query.isNotEmpty ||
-                _category == 'All' ||
-                choice.category == _category) &&
-            (query.isEmpty ||
-                choice.emoji.keywords
-                    .any((keyword) => keyword.toLowerCase().contains(query)) ||
-                choice.characters.contains(query)))
+        .where(
+          (choice) =>
+              (query.isEmpty ||
+              choice.emoji.keywords.any(
+                (keyword) => keyword.toLowerCase().contains(query),
+              ) ||
+              choice.characters.contains(query)),
+        )
         .toList(growable: false);
   }
 
@@ -8011,38 +9017,6 @@ class _EmojiPickerState extends State<_EmojiPicker> {
             ),
             const SizedBox(height: 8),
             SizedBox(
-              height: 32,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: _categories.length,
-                separatorBuilder: (_, __) => const SizedBox(width: 4),
-                itemBuilder: (context, index) {
-                  final (category, label) = _categories[index];
-                  final selected = _category == category && _query.isEmpty;
-                  return TextButton(
-                    onPressed: () => setState(() => _category = category),
-                    style: TextButton.styleFrom(
-                      backgroundColor: selected
-                          ? const Color(0xFF263650)
-                          : Colors.transparent,
-                      foregroundColor: selected ? _accent : _muted,
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: const Size(0, 30),
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(9),
-                      ),
-                    ),
-                    child: Text(
-                      appText(label),
-                      style: const TextStyle(fontSize: 11),
-                    ),
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 4),
-            SizedBox(
               height: 210,
               child: choices.isEmpty
                   ? Center(
@@ -8056,16 +9030,17 @@ class _EmojiPickerState extends State<_EmojiPicker> {
                       padding: EdgeInsets.zero,
                       gridDelegate:
                           const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 8,
-                        mainAxisSpacing: 2,
-                        crossAxisSpacing: 2,
-                      ),
+                            crossAxisCount: 8,
+                            mainAxisSpacing: 2,
+                            crossAxisSpacing: 2,
+                          ),
                       itemCount: choices.length,
                       itemBuilder: (context, index) {
                         final choice = choices[index];
                         return IconButton(
                           key: ValueKey(
-                              'emoji-picker-item-${choice.characters}'),
+                            'emoji-picker-item-${choice.characters}',
+                          ),
                           onPressed: () => widget.onSelected(choice.characters),
                           padding: EdgeInsets.zero,
                           constraints: const BoxConstraints.expand(),
@@ -8106,11 +9081,11 @@ class _AssistantReactionControl extends StatefulWidget {
 
 class _AssistantReactionControlState extends State<_AssistantReactionControl> {
   static const _quickReactions = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
-  final _link = LayerLink();
+  final Object _tapRegionGroup = Object();
   OverlayEntry? _overlayEntry;
   Timer? _closeTimer;
+  Offset _pickerOffset = Offset.zero;
   bool _showFullPicker = false;
-  bool _showFullPickerBelow = false;
   bool _pinnedOpen = false;
 
   void _openQuickReactions() {
@@ -8120,12 +9095,34 @@ class _AssistantReactionControlState extends State<_AssistantReactionControl> {
       if (!_showFullPicker) _overlayEntry!.markNeedsBuild();
       return;
     }
+    _pickerOffset = _pickerPosition(width: 252, height: 46);
     _showFullPicker = false;
     _overlayEntry = OverlayEntry(builder: _buildOverlay);
     Overlay.of(context).insert(_overlayEntry!);
   }
 
+  Offset _pickerPosition({required double width, required double height}) {
+    final target = context.findRenderObject();
+    if (target is! RenderBox || !target.hasSize) return Offset.zero;
+    final targetTopLeft = target.localToGlobal(Offset.zero);
+    final targetBottom = targetTopLeft.dy + target.size.height;
+    final screenSize = MediaQuery.sizeOf(context);
+    final below = targetTopLeft.dy < height + 16;
+    return Offset(
+      targetTopLeft.dx.clamp(8.0, screenSize.width - width - 8),
+      (below ? targetBottom + 8 : targetTopLeft.dy - height - 8).clamp(
+        8.0,
+        screenSize.height - height - 8,
+      ),
+    );
+  }
+
   void _handleTap() {
+    if (widget.reaction != null) {
+      _closePicker();
+      widget.onSelected(null);
+      return;
+    }
     if (_overlayEntry != null && _pinnedOpen && !_showFullPicker) {
       _closePicker();
       return;
@@ -8136,10 +9133,10 @@ class _AssistantReactionControlState extends State<_AssistantReactionControl> {
 
   void _openFullPicker() {
     _closeTimer?.cancel();
-    final target = context.findRenderObject();
-    if (target is RenderBox && target.hasSize) {
-      _showFullPickerBelow = target.localToGlobal(Offset.zero).dy < 330;
-    }
+    _pickerOffset = _pickerPosition(
+      width: math.min(348, MediaQuery.sizeOf(context).width - 32),
+      height: 360,
+    );
     _pinnedOpen = true;
     _showFullPicker = true;
     _overlayEntry?.markNeedsBuild();
@@ -8162,43 +9159,35 @@ class _AssistantReactionControlState extends State<_AssistantReactionControl> {
     _overlayEntry?.remove();
     _overlayEntry = null;
     _showFullPicker = false;
-    _showFullPickerBelow = false;
     _pinnedOpen = false;
   }
 
   Widget _buildOverlay(BuildContext context) {
-    final showBelow = _showFullPicker && _showFullPickerBelow;
     return Stack(
       children: [
-        if (_showFullPicker)
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _closePicker,
-              child: const SizedBox.expand(),
-            ),
-          ),
-        CompositedTransformFollower(
-          link: _link,
-          showWhenUnlinked: false,
-          targetAnchor: showBelow ? Alignment.bottomLeft : Alignment.topLeft,
-          followerAnchor: showBelow ? Alignment.topLeft : Alignment.bottomLeft,
-          offset: Offset(0, showBelow ? 8 : -8),
-          child: _showFullPicker
-              ? _EmojiPicker(onSelected: _selectReaction)
-              : MouseRegion(
-                  onEnter: (_) {
-                    _closeTimer?.cancel();
-                    _closeTimer = null;
-                  },
-                  onExit: (_) => _scheduleClose(),
-                  child: _QuickReactionCapsule(
-                    reactions: _quickReactions,
-                    selectedReaction: widget.reaction,
-                    onSelected: _selectReaction,
-                    onMore: _openFullPicker,
+        const Positioned.fill(child: IgnorePointer(child: SizedBox.expand())),
+        Positioned(
+          left: _pickerOffset.dx,
+          top: _pickerOffset.dy,
+          child: TapRegion(
+            groupId: _tapRegionGroup,
+            onTapOutside: (_) => _closePicker(),
+            child: _showFullPicker
+                ? _EmojiPicker(onSelected: _selectReaction)
+                : MouseRegion(
+                    onEnter: (_) {
+                      _closeTimer?.cancel();
+                      _closeTimer = null;
+                    },
+                    onExit: (_) => _scheduleClose(),
+                    child: _QuickReactionCapsule(
+                      reactions: _quickReactions,
+                      selectedReaction: widget.reaction,
+                      onSelected: _selectReaction,
+                      onMore: _openFullPicker,
+                    ),
                   ),
-                ),
+          ),
         ),
       ],
     );
@@ -8213,8 +9202,8 @@ class _AssistantReactionControlState extends State<_AssistantReactionControl> {
 
   @override
   Widget build(BuildContext context) {
-    return CompositedTransformTarget(
-      link: _link,
+    return TapRegion(
+      groupId: _tapRegionGroup,
       child: MouseRegion(
         onEnter: (_) => _openQuickReactions(),
         onExit: (_) => _scheduleClose(),
@@ -8261,9 +9250,7 @@ class _QuickReactionCapsule extends StatelessWidget {
     return Material(
       color: const Color(0xFF25272C),
       elevation: 12,
-      shape: const StadiumBorder(
-        side: BorderSide(color: Color(0xFF4A4D55)),
-      ),
+      shape: const StadiumBorder(side: BorderSide(color: Color(0xFF4A4D55))),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
         child: Row(
@@ -8415,9 +9402,11 @@ class _AttachmentGridState extends State<_AttachmentGrid> {
     var changed = false;
     for (final attachment in widget.attachments) {
       final filePath = attachment.path;
-      final exists = filePath != null &&
-          !attachment
-              .isExpiredAt(DateTime.now().toUtc().millisecondsSinceEpoch) &&
+      final exists =
+          filePath != null &&
+          !attachment.isExpiredAt(
+            DateTime.now().toUtc().millisecondsSinceEpoch,
+          ) &&
           File(filePath).existsSync();
       if (exists &&
           attachment.mimeType.startsWith('image/') &&
@@ -8449,26 +9438,23 @@ class _AttachmentGridState extends State<_AttachmentGrid> {
     );
     final thumbnail = File(thumbnailPath);
     try {
-      final result = await Process.run(
-        'ffmpeg',
-        [
-          '-hide_banner',
-          '-loglevel',
-          'error',
-          '-ss',
-          '0.1',
-          '-i',
-          filePath,
-          '-frames:v',
-          '1',
-          '-vf',
-          'scale=320:320:force_original_aspect_ratio=decrease',
-          '-q:v',
-          '4',
-          '-y',
-          thumbnailPath,
-        ],
-      );
+      final result = await Process.run('ffmpeg', [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-ss',
+        '0.1',
+        '-i',
+        filePath,
+        '-frames:v',
+        '1',
+        '-vf',
+        'scale=320:320:force_original_aspect_ratio=decrease',
+        '-q:v',
+        '4',
+        '-y',
+        thumbnailPath,
+      ]);
       if (result.exitCode != 0) {
         throw ProcessException(
           'ffmpeg',
@@ -8532,15 +9518,17 @@ class _AttachmentGridState extends State<_AttachmentGrid> {
         height: widget.composerStyle
             ? 68
             : widget.compactRows == 1
-                ? 92
-                : 192,
+            ? 92
+            : 192,
         child: ListView.builder(
           scrollDirection: Axis.horizontal,
           itemCount: (widget.attachments.length / widget.compactRows).ceil(),
           itemBuilder: (context, index) {
             final start = index * widget.compactRows;
-            final end =
-                math.min(start + widget.compactRows, widget.attachments.length);
+            final end = math.min(
+              start + widget.compactRows,
+              widget.attachments.length,
+            );
             return Padding(
               padding: const EdgeInsets.only(right: 8),
               child: Column(
@@ -8550,10 +9538,12 @@ class _AttachmentGridState extends State<_AttachmentGrid> {
                   for (var itemIndex = start; itemIndex < end; itemIndex++) ...[
                     if (itemIndex > start) const SizedBox(height: 8),
                     if (widget.composerStyle &&
-                        !widget.attachments[itemIndex].mimeType
-                            .startsWith('image/') &&
-                        !widget.attachments[itemIndex].mimeType
-                            .startsWith('video/'))
+                        !widget.attachments[itemIndex].mimeType.startsWith(
+                          'image/',
+                        ) &&
+                        !widget.attachments[itemIndex].mimeType.startsWith(
+                          'video/',
+                        ))
                       SizedBox(
                         height: 68,
                         child: Center(
@@ -8605,31 +9595,25 @@ class _AttachmentGridState extends State<_AttachmentGrid> {
                         missing: !exists,
                       )
                     : !exists
-                        ? _AttachmentFileTile(
-                            attachment: attachment,
-                            missing: true,
-                          )
-                        : isImage
-                            ? Image.file(
-                                File(filePath!),
-                                fit: BoxFit.contain,
-                                errorBuilder: (context, error, stackTrace) =>
-                                    _AttachmentFileTile(
-                                  attachment: attachment,
-                                  missing: true,
-                                ),
-                              )
-                            : isVideo
-                                ? _VideoAttachmentTile(
-                                    key: ValueKey(
-                                      'video-attachment-thumbnail-${attachment.id}',
-                                    ),
-                                    thumbnailPath:
-                                        _videoThumbnails[attachment.id],
-                                  )
-                                : _AttachmentFileTile(
-                                    attachment: attachment,
-                                  ),
+                    ? _AttachmentFileTile(attachment: attachment, missing: true)
+                    : isImage
+                    ? Image.file(
+                        File(filePath!),
+                        fit: BoxFit.contain,
+                        errorBuilder: (context, error, stackTrace) =>
+                            _AttachmentFileTile(
+                              attachment: attachment,
+                              missing: true,
+                            ),
+                      )
+                    : isVideo
+                    ? _VideoAttachmentTile(
+                        key: ValueKey(
+                          'video-attachment-thumbnail-${attachment.id}',
+                        ),
+                        thumbnailPath: _videoThumbnails[attachment.id],
+                      )
+                    : _AttachmentFileTile(attachment: attachment),
               ),
             ),
           ),
@@ -8716,13 +9700,13 @@ class _AttachmentGridState extends State<_AttachmentGrid> {
     final maxWidth = widget.largeMedia
         ? 320.0
         : widget.compact
-            ? 136.0
-            : 140.0;
+        ? 136.0
+        : 140.0;
     final maxHeight = widget.largeMedia
         ? 300.0
         : widget.compact
-            ? 92.0
-            : 160.0;
+        ? 92.0
+        : 160.0;
     final scale = math.min(
       maxWidth / imageSize.width,
       maxHeight / imageSize.height,
@@ -8732,10 +9716,7 @@ class _AttachmentGridState extends State<_AttachmentGrid> {
 }
 
 class _AttachmentFileTile extends StatelessWidget {
-  const _AttachmentFileTile({
-    required this.attachment,
-    this.missing = false,
-  });
+  const _AttachmentFileTile({required this.attachment, this.missing = false});
 
   final ChatAttachment attachment;
   final bool missing;
@@ -8753,16 +9734,12 @@ class _AttachmentFileTile extends StatelessWidget {
               size: 34,
             )
           : isVideo
-              ? const Icon(
-                  LucideIcons300.circlePlay,
-                  color: Colors.white,
-                  size: 34,
-                )
-              : const CustomPaint(
-                  key: ValueKey('attachment-preview-document-icon'),
-                  size: Size(28, 32),
-                  painter: _DocumentIconPainter(color: Colors.white),
-                ),
+          ? const Icon(LucideIcons300.circlePlay, color: Colors.white, size: 34)
+          : const CustomPaint(
+              key: ValueKey('attachment-preview-document-icon'),
+              size: Size(28, 32),
+              painter: _DocumentIconPainter(color: Colors.white),
+            ),
     );
   }
 }
@@ -9013,8 +9990,8 @@ class _AttachmentPreviewDialogState extends State<_AttachmentPreviewDialog> {
       position < Duration.zero
           ? Duration.zero
           : position > duration
-              ? duration
-              : position,
+          ? duration
+          : position,
     );
   }
 
@@ -9091,10 +10068,10 @@ class _AttachmentPreviewDialogState extends State<_AttachmentPreviewDialog> {
                                       const _MissingAttachmentPreview(),
                                 )
                               : _isVideo
-                                  ? _buildVideoPreview()
-                                  : _AttachmentFileTile(
-                                      attachment: widget.attachment,
-                                    ),
+                              ? _buildVideoPreview()
+                              : _AttachmentFileTile(
+                                  attachment: widget.attachment,
+                                ),
                         ),
                       ),
                     ),
@@ -9133,10 +10110,7 @@ class _AttachmentPreviewDialogState extends State<_AttachmentPreviewDialog> {
     }
     return AspectRatio(
       aspectRatio: 16 / 9,
-      child: Video(
-        controller: _videoController!,
-        controls: NoVideoControls,
-      ),
+      child: Video(controller: _videoController!, controls: NoVideoControls),
     );
   }
 }
@@ -9149,11 +10123,7 @@ class _MissingAttachmentPreview extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(
-          LucideIcons300.triangleAlert,
-          color: Color(0xFFD99000),
-          size: 44,
-        ),
+        Icon(LucideIcons300.triangleAlert, color: Color(0xFFD99000), size: 44),
         SizedBox(height: 8),
         Text(appText('Attachment file not found.')),
       ],
@@ -9199,10 +10169,12 @@ class _CameraCaptureDialogState extends State<_CameraCaptureDialog> {
         },
         onError: (Object error) {
           if (mounted) {
-            setState(() => _error = appText(
-                  'Camera preview failed: {error}',
-                  values: {'error': error},
-                ));
+            setState(
+              () => _error = appText(
+                'Camera preview failed: {error}',
+                values: {'error': error},
+              ),
+            );
           }
         },
         onDone: () {
@@ -9263,9 +10235,11 @@ class _CameraCaptureDialogState extends State<_CameraCaptureDialog> {
     _frameSubscription?.cancel();
     final session = _session;
     if (session != null) {
-      unawaited(session.dispose().catchError((Object error) {
-        debugPrint('Could not close camera preview session: $error');
-      }));
+      unawaited(
+        session.dispose().catchError((Object error) {
+          debugPrint('Could not close camera preview session: $error');
+        }),
+      );
     }
     super.dispose();
   }
@@ -9394,9 +10368,7 @@ class _CameraShutterIcon extends StatelessWidget {
         shape: BoxShape.circle,
         color: const Color(0x66000000),
         border: Border.all(color: Colors.white, width: 4),
-        boxShadow: const [
-          BoxShadow(color: Color(0x99000000), blurRadius: 8),
-        ],
+        boxShadow: const [BoxShadow(color: Color(0x99000000), blurRadius: 8)],
       ),
       alignment: Alignment.center,
       child: Container(
@@ -9626,10 +10598,7 @@ class _BranchNavigationButton extends StatelessWidget {
 }
 
 class _BranchArrowPainter extends CustomPainter {
-  const _BranchArrowPainter({
-    required this.direction,
-    required this.color,
-  });
+  const _BranchArrowPainter({required this.direction, required this.color});
 
   final _BranchArrowDirection direction;
   final Color color;

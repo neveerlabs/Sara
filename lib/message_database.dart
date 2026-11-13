@@ -1,16 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'chat_attachment.dart';
 import 'chat_message.dart';
-import 'conversation_memory.dart';
-import 'sara_autonomy.dart';
-import 'sara_inner_life.dart';
 import 'terminal_command.dart';
 
 class MessageBranchNavigation {
@@ -25,25 +21,192 @@ class MessageBranchNavigation {
   final int activeIndex;
 }
 
-Set<String> _terminalHistoryTerms(String text) => RegExp(r'[a-z0-9_./-]{2,}')
-    .allMatches(text.toLowerCase())
-    .map((match) => match.group(0)!)
-    .toSet();
+class ConversationTopicSummary {
+  const ConversationTopicSummary({
+    required this.id,
+    required this.title,
+    required this.summary,
+    required this.throughMessageId,
+    required this.updatedAtUtc,
+    this.backgroundState = const {},
+  });
 
-String _terminalHistoryResultKey(TerminalCommandHistoryEntry entry) {
-  final signature = jsonEncode([
-    entry.command,
-    entry.workingDirectory,
-    entry.exitCode,
-    entry.stdout,
-    entry.stderr,
-    entry.error,
-    entry.timedOut,
-    entry.cancelled,
-    entry.skipped,
-    entry.outputTruncated,
-  ]);
-  return sha256.convert(utf8.encode(signature)).toString();
+  final String id;
+  final String title;
+  final String summary;
+  final String throughMessageId;
+  final int updatedAtUtc;
+  final Map<String, Object?> backgroundState;
+
+  Map<String, Object?> toMap() => {
+    'id': id,
+    'title': title,
+    'summary': summary,
+    'through_message_id': throughMessageId,
+    'updated_at_utc': updatedAtUtc,
+    'background_state': jsonEncode(backgroundState),
+  };
+
+  static ConversationTopicSummary fromMap(Map<String, Object?> row) {
+    final rawState = row['background_state'];
+    if (rawState != null && rawState is! String) {
+      throw const FormatException('Conversation topic state is invalid.');
+    }
+    final decodedState = rawState == null
+        ? const <String, Object?>{}
+        : jsonDecode(rawState as String);
+    if (decodedState is! Map ||
+        decodedState.keys.any((key) => key is! String)) {
+      throw const FormatException('Conversation topic state is invalid.');
+    }
+    return ConversationTopicSummary(
+      id: row['id']! as String,
+      title: row['title']! as String,
+      summary: row['summary']! as String,
+      throughMessageId: row['through_message_id']! as String,
+      updatedAtUtc: row['updated_at_utc']! as int,
+      backgroundState: Map<String, Object?>.from(decodedState),
+    );
+  }
+}
+
+class MessageEmbeddingRecord {
+  const MessageEmbeddingRecord({
+    required this.messageId,
+    required this.topicId,
+    required this.model,
+    required this.values,
+    required this.createdAtUtc,
+  });
+
+  final String messageId;
+  final String? topicId;
+  final String model;
+  final List<double> values;
+  final int createdAtUtc;
+}
+
+class ConversationTopicEmbeddingRecord {
+  const ConversationTopicEmbeddingRecord({
+    required this.topicId,
+    required this.model,
+    required this.values,
+    required this.createdAtUtc,
+  });
+
+  final String topicId;
+  final String model;
+  final List<double> values;
+  final int createdAtUtc;
+}
+
+class UserMemoryRecord {
+  const UserMemoryRecord({
+    required this.id,
+    required this.kind,
+    required this.memoryKey,
+    required this.content,
+    required this.confidence,
+    required this.sourceMessageIds,
+    required this.createdAtUtc,
+    required this.updatedAtUtc,
+    required this.embeddingModel,
+    required this.embedding,
+    this.expiresAtUtc,
+  });
+
+  final String id;
+  final String kind;
+  final String memoryKey;
+  final String content;
+  final double confidence;
+  final List<String> sourceMessageIds;
+  final int createdAtUtc;
+  final int updatedAtUtc;
+  final int? expiresAtUtc;
+  final String embeddingModel;
+  final List<double> embedding;
+
+  Map<String, Object?> toMap() => {
+    'id': id,
+    'kind': kind,
+    'memory_key': memoryKey,
+    'content': content,
+    'confidence': confidence,
+    'source_message_ids': jsonEncode(sourceMessageIds),
+    'created_at_utc': createdAtUtc,
+    'updated_at_utc': updatedAtUtc,
+    'expires_at_utc': expiresAtUtc,
+    'embedding_model': embeddingModel,
+    'embedding': jsonEncode(embedding),
+  };
+
+  static UserMemoryRecord fromMap(Map<String, Object?> row) {
+    final rawSources = jsonDecode(row['source_message_ids']! as String);
+    final rawEmbedding = jsonDecode(row['embedding']! as String);
+    final confidence = row['confidence'];
+    if (rawSources is! List ||
+        rawSources.any((value) => value is! String) ||
+        rawEmbedding is! List ||
+        rawEmbedding.isEmpty ||
+        rawEmbedding.any(
+          (value) => value is! num || !value.toDouble().isFinite,
+        ) ||
+        confidence is! num ||
+        !confidence.toDouble().isFinite ||
+        confidence < 0 ||
+        confidence > 1) {
+      throw const FormatException('Stored user memory is invalid.');
+    }
+    return UserMemoryRecord(
+      id: row['id']! as String,
+      kind: row['kind']! as String,
+      memoryKey: row['memory_key']! as String,
+      content: row['content']! as String,
+      confidence: confidence.toDouble(),
+      sourceMessageIds: rawSources.cast<String>(),
+      createdAtUtc: row['created_at_utc']! as int,
+      updatedAtUtc: row['updated_at_utc']! as int,
+      expiresAtUtc: row['expires_at_utc'] as int?,
+      embeddingModel: row['embedding_model']! as String,
+      embedding: rawEmbedding
+          .map((value) => (value as num).toDouble())
+          .toList(),
+    );
+  }
+}
+
+class ConversationMemoryJob {
+  const ConversationMemoryJob({
+    required this.id,
+    required this.userMessageId,
+    required this.modelMessageId,
+    required this.queuedAtUtc,
+    required this.forkTopicOnUpdate,
+  });
+
+  final String id;
+  final String userMessageId;
+  final String? modelMessageId;
+  final int queuedAtUtc;
+  final bool forkTopicOnUpdate;
+
+  Map<String, Object?> toMap() => {
+    'id': id,
+    'user_message_id': userMessageId,
+    'model_message_id': modelMessageId,
+    'queued_at_utc': queuedAtUtc,
+    'fork_topic_on_update': forkTopicOnUpdate ? 1 : 0,
+  };
+
+  static ConversationMemoryJob fromMap(Map<String, Object?> row) =>
+      ConversationMemoryJob(
+        id: row['id']! as String,
+        userMessageId: row['user_message_id']! as String,
+        modelMessageId: row['model_message_id'] as String?,
+        queuedAtUtc: row['queued_at_utc']! as int,
+        forkTopicOnUpdate: row['fork_topic_on_update'] == 1,
+      );
 }
 
 abstract interface class MessageStore {
@@ -53,38 +216,16 @@ abstract interface class MessageStore {
   Future<List<String>> loadSubtreeMessageIds(String messageId);
   Future<List<ChatMessage>> activateMessageBranch(String messageId);
   Future<Map<String, List<ChatAttachment>>> loadAttachments();
-  Future<List<ConversationMemory>> loadConversationMemories();
-  Future<void> saveConversationMemory(ConversationMemory memory);
-  Future<SaraInnerLife> loadSaraInnerLife();
-  Future<SaraInnerLife> loadSaraInnerLifeForPath(List<String> activeMessageIds);
-  Future<void> saveSaraInnerLife(SaraInnerLife state);
-  Future<void> saveSaraInnerLifeForBranch(
-    SaraInnerLife state,
-    String branchMessageId,
+  Future<void> saveTerminalCommandActivities(
+    String messageId,
+    List<TerminalCommandHistoryEntry> activities,
   );
-  Future<List<SaraPrivateThought>> loadPrivateThoughts({int? limit = 20});
-  Future<void> saveTerminalCommandHistory(TerminalCommandHistoryEntry entry);
-  Future<Map<String, List<TerminalCommandHistoryEntry>>>
-      loadTerminalCommandActivities(Set<String> responseMessageIds);
-  Future<List<Map<String, Object?>>> searchTerminalCommandHistory(
-    String query, {
-    int limit = 3,
-  });
-  Future<void> savePrivateThought(SaraPrivateThought thought);
-  Future<bool> savePrivateThoughtIfSourcesExist(SaraPrivateThought thought);
-  Future<bool> savePrivateThoughtIfActiveLeaf(
-    SaraPrivateThought thought, {
-    required String? expectedLeafId,
-  });
-  Future<bool> saveSaraInnerLifeIfActiveLeaf(
-    SaraInnerLife state, {
-    required String expectedLeafId,
-  });
+  Future<void> moveTerminalCommandActivities(
+    String fromMessageId,
+    String toMessageId,
+  );
   Future<Map<String, int>> loadAssistantFeedback();
   Future<Map<String, String>> loadAssistantReactions();
-  Future<String?> loadFeedbackPreferenceSummary({
-    Set<String>? activeMessageIds,
-  });
   Future<void> saveAssistantFeedback(
     String userMessageId,
     String responseMessageId,
@@ -94,13 +235,6 @@ abstract interface class MessageStore {
     String userMessageId,
     String responseMessageId,
     String? reaction,
-  );
-  Future<List<SaraAutonomyGoal>> loadAutonomyGoalsForPath(
-    List<String> activeMessageIds,
-  );
-  Future<void> saveAutonomyGoalsForBranch(
-    List<SaraAutonomyGoal> goals,
-    String branchMessageId,
   );
   Future<List<ChatAttachment>> loadExpiredAttachments(int nowUtc);
   Future<void> expireAttachments(int nowUtc);
@@ -112,7 +246,9 @@ abstract interface class MessageStore {
     required String? expectedLeafId,
   });
   Future<void> saveMessageAttachments(
-      String messageId, List<ChatAttachment> attachments);
+    String messageId,
+    List<ChatAttachment> attachments,
+  );
   Future<void> saveExchange(List<ChatMessage> messages);
   Future<void> saveExchangeWithAttachments(
     List<ChatMessage> messages,
@@ -120,6 +256,30 @@ abstract interface class MessageStore {
     List<ChatAttachment> attachments, {
     Map<String, List<ChatAttachment>> additionalAttachments =
         const <String, List<ChatAttachment>>{},
+  });
+  Future<List<ConversationTopicSummary>> loadConversationTopicSummaries();
+  Future<List<MessageEmbeddingRecord>> loadMessageEmbeddings();
+  Future<List<MessageEmbeddingRecord>> loadMessageEmbeddingsForMessages(
+    List<String> messageIds,
+  );
+  Future<List<ConversationTopicEmbeddingRecord>>
+  loadConversationTopicEmbeddings();
+  Future<List<UserMemoryRecord>> loadUserMemories();
+  Future<List<ConversationMemoryJob>> loadConversationMemoryJobs();
+  Future<void> enqueueConversationMemoryJob(ConversationMemoryJob job);
+  Future<void> deleteConversationMemoryJobs(List<String> jobIds);
+  Future<void> saveMessageEmbeddings(List<MessageEmbeddingRecord> embeddings);
+  Future<void> saveConversationTopicEmbeddings(
+    List<ConversationTopicEmbeddingRecord> embeddings,
+  );
+  Future<void> saveConversationMemory({
+    required ConversationTopicSummary topic,
+    required List<MessageEmbeddingRecord> embeddings,
+    List<String> topicSourceMessageIds = const [],
+    List<ConversationTopicEmbeddingRecord> topicEmbeddings = const [],
+    List<UserMemoryRecord> userMemories = const [],
+    List<String> completedJobIds = const [],
+    List<String> deletedMemoryIds = const [],
   });
   Future<void> deleteMessage(String id);
   Future<void> deleteMessages(List<String> ids);
@@ -142,17 +302,18 @@ class SqliteMessageStore implements MessageStore {
     'message',
     'personal',
     'message_attachment',
-    'conversation_memory',
-    'sara_inner_life',
-    'assistant_feedback',
-    'feedback_preference',
     'active_child',
-    'conversation_state',
-    'sara_inner_life_branch',
-    'sara_private_thought',
-    'sara_autonomy_goal',
-    'terminal_command_history',
-    'terminal_command_activity_link',
+    'conversation_topic',
+    'message_embedding',
+    'conversation_topic_embedding',
+    'user_memory',
+    'background_memory_job',
+  ];
+  static const _requiredBackupTables = [
+    'message',
+    'personal',
+    'message_attachment',
+    'active_child',
   ];
 
   final Database _database;
@@ -170,20 +331,14 @@ class SqliteMessageStore implements MessageStore {
     final database = await databaseFactory.openDatabase(
       databasePath,
       options: OpenDatabaseOptions(
-        version: 18,
+        version: 26,
         onCreate: (database, version) async {
           await _createMessageTable(database);
           await _createPersonalTable(database);
           await _createAttachmentTable(database);
-          await _createConversationMemoryTable(database);
-          await _createSaraInnerLifeTable(database);
-          await _createAssistantFeedbackTables(database);
           await _createBranchTables(database);
-          await _createInnerLifeBranchTable(database);
-          await _createPrivateThoughtTable(database);
-          await _createAutonomyGoalTable(database);
-          await _createTerminalCommandHistoryTable(database);
-          await _createTerminalCommandActivityLinkTable(database);
+          await _createConversationRagTables(database);
+          await _createUserMemoryTables(database);
         },
         onUpgrade: (database, oldVersion, newVersion) async {
           if (oldVersion < 2) await _createPersonalTable(database);
@@ -196,31 +351,19 @@ class SqliteMessageStore implements MessageStore {
               await database.update(
                 'message',
                 {
-                  'timestamp':
-                      formatJakartaTimestamp(message['created_at_utc']! as int),
+                  'timestamp': formatJakartaTimestamp(
+                    message['created_at_utc']! as int,
+                  ),
                 },
                 where: 'id = ?',
                 whereArgs: [message['id']],
               );
             }
           }
+
           if (oldVersion < 4) await _createLegacyAttachmentTable(database);
           if (oldVersion < 5) await _migrateAttachmentExpiry(database);
-          if (oldVersion < 6) await _createConversationMemoryTable(database);
-          if (oldVersion < 7) await _createSaraInnerLifeTable(database);
-          if (oldVersion < 8) await _createAssistantFeedbackTables(database);
           if (oldVersion < 9) await _migrateConversationBranches(database);
-          if (oldVersion < 10) await _createInnerLifeBranchTable(database);
-          if (oldVersion < 11) await _migrateMessageTypeToText(database);
-          if (oldVersion < 12) await _createPrivateThoughtTable(database);
-          if (oldVersion < 13) await _createAutonomyGoalTable(database);
-          if (oldVersion >= 12 && oldVersion < 14) {
-            await database.execute(
-              'ALTER TABLE sara_private_thought '
-              'ADD COLUMN is_remembered INTEGER NOT NULL DEFAULT 0 '
-              'CHECK (is_remembered IN (0, 1))',
-            );
-          }
           if (oldVersion < 15) {
             await _createTerminalCommandHistoryTable(database);
           }
@@ -234,12 +377,41 @@ class SqliteMessageStore implements MessageStore {
               'ON terminal_command_history(response_message_id)',
             );
           }
-          if (oldVersion < 17) {
-            await _createTerminalCommandActivityLinkTable(database);
-            await _deduplicateTerminalCommandHistory(database);
+          if (oldVersion < 19) {
+            await database.execute(
+              'DROP TABLE IF EXISTS sara_inner_life_branch',
+            );
+            await database.execute('DROP TABLE IF EXISTS sara_inner_life');
           }
-          if (oldVersion < 18) {
-            await _migrateAssistantFeedbackForReactions(database);
+          if (oldVersion < 20) {
+            await _migrateAiDataOut(database);
+          }
+          if (oldVersion < 21) {
+            await _migrateToSimplifiedSchema(database);
+          }
+          if (oldVersion < 22) {
+            await _migrateTerminalCommandData(database);
+          }
+          if (oldVersion < 23) {
+            await _createConversationRagTables(database);
+          }
+          if (oldVersion < 24 &&
+              await _tableExists(database, 'conversation_topic') &&
+              !await _columnExists(
+                database,
+                'conversation_topic',
+                'background_state',
+              )) {
+            await database.execute(
+              "ALTER TABLE conversation_topic ADD COLUMN "
+              "background_state TEXT NOT NULL DEFAULT '{}'",
+            );
+          }
+          if (oldVersion < 25) {
+            await _migrateToVersion25(database);
+          }
+          if (oldVersion < 26) {
+            await _createUserMemoryTables(database);
           }
         },
       ),
@@ -252,49 +424,17 @@ class SqliteMessageStore implements MessageStore {
       CREATE TABLE message (
         id TEXT PRIMARY KEY NOT NULL,
         role TEXT NOT NULL CHECK (role IN ('user', 'model')),
-        type TEXT NOT NULL CHECK (type = 'text'),
         content TEXT NOT NULL,
         timestamp TEXT NOT NULL,
         created_at_utc INTEGER NOT NULL,
-        parent_message_id TEXT
+        rating INTEGER CHECK (rating IN (-1, 1)),
+        reaction TEXT,
+        parent_message_id TEXT,
+        terminal_command_data TEXT NOT NULL DEFAULT '[]'
       )
     ''');
     await database.execute(
       'CREATE INDEX message_order ON message(created_at_utc ASC, id ASC)',
-    );
-  }
-
-  static Future<void> _migrateMessageTypeToText(
-    DatabaseExecutor database,
-  ) async {
-    await database.execute('''
-      CREATE TABLE message_v11 (
-        id TEXT PRIMARY KEY NOT NULL,
-        role TEXT NOT NULL CHECK (role IN ('user', 'model')),
-        type TEXT NOT NULL CHECK (type = 'text'),
-        content TEXT NOT NULL,
-        timestamp TEXT NOT NULL,
-        created_at_utc INTEGER NOT NULL,
-        parent_message_id TEXT
-      )
-    ''');
-    await database.execute('''
-      INSERT INTO message_v11 (
-        id, role, type, content, timestamp, created_at_utc, parent_message_id
-      )
-      SELECT id, role, 'text', content, timestamp, created_at_utc,
-             parent_message_id
-      FROM message
-    ''');
-    await database.execute('DROP TABLE message');
-    await database.execute(
-      'ALTER TABLE message_v11 RENAME TO message',
-    );
-    await database.execute(
-      'CREATE INDEX message_order ON message(created_at_utc ASC, id ASC)',
-    );
-    await database.execute(
-      'CREATE INDEX message_parent ON message(parent_message_id)',
     );
   }
 
@@ -326,23 +466,125 @@ class SqliteMessageStore implements MessageStore {
     );
   }
 
-  static Future<void> _createConversationMemoryTable(
-      DatabaseExecutor database) async {
+  static Future<void> _createConversationRagTables(
+    DatabaseExecutor database,
+  ) async {
     await database.execute('''
-      CREATE TABLE conversation_memory (
+      CREATE TABLE IF NOT EXISTS conversation_topic (
         id TEXT PRIMARY KEY NOT NULL,
         title TEXT NOT NULL,
         summary TEXT NOT NULL,
+        through_message_id TEXT NOT NULL,
+        updated_at_utc INTEGER NOT NULL,
+        background_state TEXT NOT NULL DEFAULT '{}'
+      )
+    ''');
+    await _createMessageEmbeddingTable(database);
+    await _createConversationTopicEmbeddingTable(database);
+  }
+
+  static Future<void> _createUserMemoryTables(DatabaseExecutor database) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS user_memory (
+        id TEXT PRIMARY KEY NOT NULL,
+        kind TEXT NOT NULL CHECK (
+          kind IN ('habit', 'preference', 'wellbeing', 'follow_up')
+        ),
+        memory_key TEXT NOT NULL,
+        content TEXT NOT NULL,
+        confidence REAL NOT NULL CHECK (confidence BETWEEN 0 AND 1),
         source_message_ids TEXT NOT NULL,
-        start_at_utc INTEGER NOT NULL,
-        end_at_utc INTEGER NOT NULL,
-        updated_at_utc INTEGER NOT NULL
+        created_at_utc INTEGER NOT NULL,
+        updated_at_utc INTEGER NOT NULL,
+        expires_at_utc INTEGER,
+        embedding_model TEXT NOT NULL,
+        embedding TEXT NOT NULL
+      )
+    ''');
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS background_memory_job (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_message_id TEXT NOT NULL,
+        model_message_id TEXT,
+        queued_at_utc INTEGER NOT NULL,
+        fork_topic_on_update INTEGER NOT NULL DEFAULT 0
+          CHECK (fork_topic_on_update IN (0, 1))
       )
     ''');
     await database.execute(
-      'CREATE INDEX conversation_memory_time '
-      'ON conversation_memory(end_at_utc DESC)',
+      'CREATE INDEX IF NOT EXISTS background_memory_job_order '
+      'ON background_memory_job(queued_at_utc ASC)',
     );
+  }
+
+  static Future<void> _createMessageEmbeddingTable(
+    DatabaseExecutor database,
+  ) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS message_embedding (
+        message_id TEXT NOT NULL,
+        topic_id TEXT,
+        model TEXT NOT NULL,
+        embedding TEXT NOT NULL,
+        created_at_utc INTEGER NOT NULL,
+        PRIMARY KEY (message_id, model)
+      )
+    ''');
+    await database.execute(
+      'CREATE INDEX IF NOT EXISTS message_embedding_topic '
+      'ON message_embedding(topic_id)',
+    );
+  }
+
+  static Future<void> _createConversationTopicEmbeddingTable(
+    DatabaseExecutor database,
+  ) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS conversation_topic_embedding (
+        topic_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        embedding TEXT NOT NULL,
+        created_at_utc INTEGER NOT NULL,
+        PRIMARY KEY (topic_id, model)
+      )
+    ''');
+  }
+
+  static Future<void> _migrateToVersion25(DatabaseExecutor database) async {
+    if (!await _tableExists(database, 'message_embedding')) {
+      await _createMessageEmbeddingTable(database);
+    } else {
+      final columns = await database.rawQuery(
+        'PRAGMA table_info("message_embedding")',
+      );
+      final primaryKeyColumns =
+          columns.where((column) => (column['pk']! as int) > 0).toList()..sort(
+            (left, right) =>
+                (left['pk']! as int).compareTo(right['pk']! as int),
+          );
+      final primaryKey = primaryKeyColumns
+          .map((column) => column['name']! as String)
+          .toList(growable: false);
+      if (primaryKey.length != 2 ||
+          primaryKey[0] != 'message_id' ||
+          primaryKey[1] != 'model') {
+        await database.execute('DROP INDEX IF EXISTS message_embedding_topic');
+        await database.execute(
+          'ALTER TABLE message_embedding RENAME TO message_embedding_v24',
+        );
+        await _createMessageEmbeddingTable(database);
+        await database.execute('''
+          INSERT INTO message_embedding
+            (message_id, topic_id, model, embedding, created_at_utc)
+          SELECT message_id, topic_id, model, embedding, created_at_utc
+          FROM message_embedding_v24
+        ''');
+        await database.execute('DROP TABLE message_embedding_v24');
+      }
+    }
+    if (!await _tableExists(database, 'conversation_topic_embedding')) {
+      await _createConversationTopicEmbeddingTable(database);
+    }
   }
 
   static Future<void> _createTerminalCommandHistoryTable(
@@ -376,176 +618,58 @@ class SqliteMessageStore implements MessageStore {
     );
   }
 
-  static Future<void> _createTerminalCommandActivityLinkTable(
+  static Future<bool> _columnExists(
     DatabaseExecutor database,
+    String table,
+    String column,
   ) async {
-    await database.execute('''
-      CREATE TABLE terminal_command_activity_link (
-        terminal_history_id INTEGER NOT NULL,
-        response_message_id TEXT NOT NULL,
-        PRIMARY KEY (terminal_history_id, response_message_id)
-      )
-    ''');
-    await database.execute(
-      'CREATE INDEX terminal_command_activity_response '
-      'ON terminal_command_activity_link(response_message_id)',
-    );
+    final rows = await database.rawQuery('PRAGMA table_info("$table")');
+    return rows.any((row) => row['name'] == column);
   }
 
-  static Future<void> _deduplicateTerminalCommandHistory(
-    DatabaseExecutor database,
-  ) async {
-    final rows = await database.query(
-      'terminal_command_history',
-      orderBy: 'id ASC',
-    );
-    final canonicalIdsByResult = <String, int>{};
-    const contextSeparator = '\n\n---\n\n';
-
-    Future<void> linkResponse(int historyId, String? responseId) async {
-      if (responseId == null) return;
-      await database.insert(
-        'terminal_command_activity_link',
-        {
-          'terminal_history_id': historyId,
-          'response_message_id': responseId,
-        },
-        conflictAlgorithm: ConflictAlgorithm.ignore,
+  static Future<void> _migrateAiDataOut(DatabaseExecutor database) async {
+    if (!await _columnExists(database, 'message', 'rating')) {
+      await database.execute(
+        'ALTER TABLE message ADD COLUMN rating INTEGER '
+        'CHECK (rating IN (-1, 1))',
       );
     }
-
-    for (final row in rows) {
-      final entry = TerminalCommandHistoryEntry.fromMap(row);
-      final historyId = entry.id!;
-      final resultKey = _terminalHistoryResultKey(entry);
-      final canonicalId = canonicalIdsByResult[resultKey];
-      await linkResponse(historyId, entry.responseMessageId);
-      if (canonicalId == null) {
-        canonicalIdsByResult[resultKey] = historyId;
-        continue;
-      }
-
-      final canonicalRows = await database.query(
-        'terminal_command_history',
-        columns: ['task_context'],
-        where: 'id = ?',
-        whereArgs: [canonicalId],
-        limit: 1,
-      );
-      final existingContext = canonicalRows.single['task_context']! as String;
-      final contexts = existingContext.split(contextSeparator);
-      if (entry.taskContext.isNotEmpty &&
-          !contexts.contains(entry.taskContext)) {
-        contexts.add(entry.taskContext);
-        await database.update(
-          'terminal_command_history',
-          {'task_context': contexts.join(contextSeparator)},
-          where: 'id = ?',
-          whereArgs: [canonicalId],
-        );
-      }
-
-      final linkedResponses = await database.query(
-        'terminal_command_activity_link',
-        columns: ['response_message_id'],
-        where: 'terminal_history_id = ?',
-        whereArgs: [historyId],
-      );
-      for (final link in linkedResponses) {
-        await linkResponse(canonicalId, link['response_message_id']! as String);
-      }
-      await database.delete(
-        'terminal_command_activity_link',
-        where: 'terminal_history_id = ?',
-        whereArgs: [historyId],
-      );
-      await database.delete(
-        'terminal_command_history',
-        where: 'id = ?',
-        whereArgs: [historyId],
-      );
+    if (!await _columnExists(database, 'message', 'reaction')) {
+      await database.execute('ALTER TABLE message ADD COLUMN reaction TEXT');
     }
-  }
-
-  static Future<void> _createSaraInnerLifeTable(
-      DatabaseExecutor database) async {
-    await database.execute('''
-      CREATE TABLE sara_inner_life (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        mood TEXT NOT NULL,
-        mood_intensity INTEGER NOT NULL,
-        energy INTEGER NOT NULL,
-        drives_json TEXT NOT NULL,
-        self_reflection TEXT NOT NULL,
-        source_message_ids TEXT NOT NULL,
-        updated_at_utc INTEGER NOT NULL
-      )
-    ''');
-  }
-
-  static Future<void> _createAssistantFeedbackTables(
-      DatabaseExecutor database) async {
-    await _createAssistantFeedbackTable(database);
-    await database.execute('''
-      CREATE TABLE feedback_preference (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        summary TEXT NOT NULL,
-        updated_at_utc INTEGER NOT NULL
-      )
-    ''');
-  }
-
-  static Future<void> _createAssistantFeedbackTable(
-    DatabaseExecutor database,
-  ) async {
-    await database.execute('''
-      CREATE TABLE assistant_feedback (
-        response_message_id TEXT PRIMARY KEY NOT NULL,
-        user_message_id TEXT NOT NULL,
-        rating INTEGER CHECK (rating IN (-1, 1)),
-        reaction TEXT,
-        is_concise INTEGER NOT NULL,
-        has_list INTEGER NOT NULL,
-        has_code INTEGER NOT NULL,
-        updated_at_utc INTEGER NOT NULL,
-        CHECK (rating IS NOT NULL OR reaction IS NOT NULL)
-      )
-    ''');
-  }
-
-  static Future<void> _migrateAssistantFeedbackForReactions(
-    DatabaseExecutor database,
-  ) async {
-    final feedbackTableExists = await _tableExists(
+    final feedbackExists = await _columnExists(
       database,
       'assistant_feedback',
+      'response_message_id',
     );
-    if (!feedbackTableExists) {
-      await _createAssistantFeedbackTable(database);
-    } else {
-      await database.execute(
-        'ALTER TABLE assistant_feedback RENAME TO assistant_feedback_v17',
-      );
-      await _createAssistantFeedbackTable(database);
+    if (feedbackExists) {
+      final ratingExpression =
+          await _columnExists(database, 'assistant_feedback', 'rating')
+          ? '(SELECT rating FROM assistant_feedback '
+                'WHERE response_message_id = message.id)'
+          : 'NULL';
+      final reactionExpression =
+          await _columnExists(database, 'assistant_feedback', 'reaction')
+          ? '(SELECT reaction FROM assistant_feedback '
+                'WHERE response_message_id = message.id)'
+          : 'NULL';
       await database.execute('''
-        INSERT INTO assistant_feedback (
-          response_message_id, user_message_id, rating, reaction,
-          is_concise, has_list, has_code, updated_at_utc
+        UPDATE message
+        SET rating = $ratingExpression,
+            reaction = $reactionExpression
+        WHERE id IN (
+          SELECT response_message_id FROM assistant_feedback
         )
-        SELECT response_message_id, user_message_id, rating, NULL,
-               is_concise, has_list, has_code, updated_at_utc
-        FROM assistant_feedback_v17
       ''');
-      await database.execute('DROP TABLE assistant_feedback_v17');
     }
-    if (!await _tableExists(database, 'feedback_preference')) {
-      await database.execute('''
-        CREATE TABLE feedback_preference (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          summary TEXT NOT NULL,
-          updated_at_utc INTEGER NOT NULL
-        )
-      ''');
+    for (final table in [
+      'conversation_memory',
+      'sara_private_thought',
+      'sara_autonomy_goal',
+      'assistant_feedback',
+      'feedback_preference',
+    ]) {
+      await database.execute('DROP TABLE IF EXISTS "$table"');
     }
   }
 
@@ -560,6 +684,171 @@ class SqliteMessageStore implements MessageStore {
     return rows.isNotEmpty;
   }
 
+  static Future<void> _migrateToSimplifiedSchema(
+    DatabaseExecutor database,
+  ) async {
+    await database.execute('''
+      CREATE TABLE message_v21 (
+        id TEXT PRIMARY KEY NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('user', 'model')),
+        content TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        created_at_utc INTEGER NOT NULL,
+        rating INTEGER CHECK (rating IN (-1, 1)),
+        reaction TEXT,
+        parent_message_id TEXT
+      )
+    ''');
+    await database.execute('''
+      INSERT INTO message_v21 (
+        id, role, content, timestamp, created_at_utc, rating, reaction,
+        parent_message_id
+      )
+      SELECT id, role, content, timestamp, created_at_utc, rating, reaction,
+             parent_message_id
+      FROM message
+    ''');
+    await database.execute('DROP TABLE message');
+    await database.execute('ALTER TABLE message_v21 RENAME TO message');
+    await database.execute(
+      'CREATE INDEX message_order ON message(created_at_utc ASC, id ASC)',
+    );
+    await database.execute(
+      'CREATE INDEX message_parent ON message(parent_message_id)',
+    );
+
+    if (await _tableExists(database, 'conversation_state')) {
+      await database.execute('DROP TABLE conversation_state');
+    }
+
+    if (await _tableExists(database, 'terminal_command_activity_link')) {
+      final historyRows = await database.query(
+        'terminal_command_history',
+        orderBy: 'id ASC',
+      );
+      final links = await database.query('terminal_command_activity_link');
+      final linkedResponses = <int, List<String>>{};
+      for (final link in links) {
+        linkedResponses
+            .putIfAbsent(link['terminal_history_id']! as int, () => [])
+            .add(link['response_message_id']! as String);
+      }
+
+      for (final row in historyRows) {
+        final responseIds = <String>[];
+        final directResponseId = row['response_message_id'] as String?;
+        if (directResponseId != null) responseIds.add(directResponseId);
+        for (final linkedResponseId
+            in linkedResponses[row['id']! as int] ?? const <String>[]) {
+          if (!responseIds.contains(linkedResponseId)) {
+            responseIds.add(linkedResponseId);
+          }
+        }
+        if (responseIds.isEmpty) continue;
+
+        await database.update(
+          'terminal_command_history',
+          {'response_message_id': responseIds.first},
+          where: 'id = ?',
+          whereArgs: [row['id']],
+        );
+        for (final responseId in responseIds.skip(1)) {
+          final duplicate = Map<String, Object?>.from(row)
+            ..remove('id')
+            ..['response_message_id'] = responseId;
+          await database.insert('terminal_command_history', duplicate);
+        }
+      }
+      await database.execute('DROP TABLE terminal_command_activity_link');
+    }
+  }
+
+  static Future<void> _migrateTerminalCommandData(
+    DatabaseExecutor database,
+  ) async {
+    if (!await _columnExists(database, 'message', 'terminal_command_data')) {
+      await database.execute(
+        "ALTER TABLE message ADD COLUMN terminal_command_data TEXT "
+        "NOT NULL DEFAULT '[]'",
+      );
+    }
+
+    if (!await _tableExists(database, 'terminal_command_history')) {
+      if (await _tableExists(database, 'terminal_command_activity_link')) {
+        await database.execute('DROP TABLE terminal_command_activity_link');
+      }
+      return;
+    }
+
+    final messageRows = await database.query(
+      'message',
+      columns: ['id', 'terminal_command_data'],
+    );
+    final messageIds = messageRows.map((row) => row['id']! as String).toSet();
+    final histories = await database.query(
+      'terminal_command_history',
+      orderBy: 'created_at_utc ASC, id ASC',
+    );
+    final responseIdsByHistory = <int, List<String>>{};
+    if (await _tableExists(database, 'terminal_command_activity_link')) {
+      for (final link in await database.query(
+        'terminal_command_activity_link',
+      )) {
+        final responseId = link['response_message_id'];
+        if (responseId is String && messageIds.contains(responseId)) {
+          responseIdsByHistory
+              .putIfAbsent(link['terminal_history_id']! as int, () => [])
+              .add(responseId);
+        }
+      }
+    }
+
+    final activitiesByMessage = <String, List<TerminalCommandHistoryEntry>>{};
+    for (final row in histories) {
+      final responseIds = <String>[];
+      final directResponseId = row['response_message_id'];
+      if (directResponseId is String && messageIds.contains(directResponseId)) {
+        responseIds.add(directResponseId);
+      }
+      for (final responseId
+          in responseIdsByHistory[row['id']! as int] ?? const <String>[]) {
+        if (!responseIds.contains(responseId)) responseIds.add(responseId);
+      }
+      for (final responseId in responseIds) {
+        activitiesByMessage
+            .putIfAbsent(responseId, () => [])
+            .add(
+              TerminalCommandHistoryEntry.fromMap({
+                ...row,
+                'response_message_id': responseId,
+              }),
+            );
+      }
+    }
+
+    for (final row in messageRows) {
+      final messageId = row['id']! as String;
+      final activities = activitiesByMessage[messageId];
+      if (activities == null || activities.isEmpty) continue;
+      final existing =
+          jsonDecode(row['terminal_command_data']! as String) as List<dynamic>;
+      final merged = [
+        ...existing,
+        ...activities.map((activity) => activity.toMap()),
+      ];
+      await database.update(
+        'message',
+        {'terminal_command_data': jsonEncode(merged)},
+        where: 'id = ?',
+        whereArgs: [messageId],
+      );
+    }
+    if (await _tableExists(database, 'terminal_command_activity_link')) {
+      await database.execute('DROP TABLE terminal_command_activity_link');
+    }
+    await database.execute('DROP TABLE terminal_command_history');
+  }
+
   static Future<void> _createBranchTables(DatabaseExecutor database) async {
     await database.execute('''
       CREATE TABLE active_child (
@@ -567,71 +856,8 @@ class SqliteMessageStore implements MessageStore {
         child_message_id TEXT NOT NULL
       )
     ''');
-    await database.execute('''
-      CREATE TABLE conversation_state (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        active_leaf_message_id TEXT
-      )
-    ''');
     await database.execute(
       'CREATE INDEX message_parent ON message(parent_message_id)',
-    );
-    await database.insert('conversation_state', {
-      'id': 1,
-      'active_leaf_message_id': null,
-    });
-  }
-
-  static Future<void> _createInnerLifeBranchTable(DatabaseExecutor database) {
-    return database.execute('''
-      CREATE TABLE sara_inner_life_branch (
-        branch_message_id TEXT PRIMARY KEY NOT NULL,
-        mood TEXT NOT NULL,
-        mood_intensity INTEGER NOT NULL,
-        energy INTEGER NOT NULL,
-        drives_json TEXT NOT NULL,
-        self_reflection TEXT NOT NULL,
-        source_message_ids TEXT NOT NULL,
-        updated_at_utc INTEGER NOT NULL
-      )
-    ''');
-  }
-
-  static Future<void> _createPrivateThoughtTable(
-      DatabaseExecutor database) async {
-    await database.execute('''
-      CREATE TABLE sara_private_thought (
-        id TEXT PRIMARY KEY NOT NULL,
-        reflection TEXT NOT NULL,
-        action TEXT NOT NULL CHECK (action IN ('think', 'rest', 'reach_out')),
-        is_remembered INTEGER NOT NULL DEFAULT 0 CHECK (is_remembered IN (0, 1)),
-        source_message_ids TEXT NOT NULL,
-        created_at_utc INTEGER NOT NULL
-      )
-    ''');
-    await database.execute(
-      'CREATE INDEX sara_private_thought_time '
-      'ON sara_private_thought(created_at_utc DESC)',
-    );
-  }
-
-  static Future<void> _createAutonomyGoalTable(
-      DatabaseExecutor database) async {
-    await database.execute('''
-      CREATE TABLE sara_autonomy_goal (
-        id TEXT NOT NULL,
-        branch_message_id TEXT NOT NULL,
-        title TEXT NOT NULL,
-        description TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('active', 'completed')),
-        source_message_ids TEXT NOT NULL,
-        updated_at_utc INTEGER NOT NULL,
-        PRIMARY KEY (id, branch_message_id)
-      )
-    ''');
-    await database.execute(
-      'CREATE INDEX sara_autonomy_goal_branch '
-      'ON sara_autonomy_goal(branch_message_id)',
     );
   }
 
@@ -664,12 +890,6 @@ class SqliteMessageStore implements MessageStore {
       }
       parentId = messageId;
     }
-    await database.update(
-      'conversation_state',
-      {'active_leaf_message_id': parentId},
-      where: 'id = ?',
-      whereArgs: [1],
-    );
   }
 
   static Future<void> _createLegacyAttachmentTable(DatabaseExecutor database) {
@@ -685,7 +905,8 @@ class SqliteMessageStore implements MessageStore {
   }
 
   static Future<void> _migrateAttachmentExpiry(
-      DatabaseExecutor database) async {
+    DatabaseExecutor database,
+  ) async {
     final legacyRows = await database.rawQuery('''
       SELECT attachment.*, message.created_at_utc
       FROM message_attachment AS attachment
@@ -774,8 +995,9 @@ class SqliteMessageStore implements MessageStore {
       final availableChildren = children[currentId] ?? const <String>[];
       if (availableChildren.isEmpty) break;
       final chosen = activeChild[currentId];
-      currentId =
-          availableChildren.contains(chosen) ? chosen! : availableChildren.last;
+      currentId = availableChildren.contains(chosen)
+          ? chosen!
+          : availableChildren.last;
     }
     return result;
   }
@@ -856,30 +1078,12 @@ class SqliteMessageStore implements MessageStore {
       if (parentId == null) {
         throw StateError('The root message has no alternative branch.');
       }
-      await transaction.insert(
-        'active_child',
-        {
-          'parent_message_id': parentId,
-          'child_message_id': messageId,
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      await _updateActiveLeaf(transaction);
+      await transaction.insert('active_child', {
+        'parent_message_id': parentId,
+        'child_message_id': messageId,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
     });
     return loadActiveMessages();
-  }
-
-  static Future<void> _updateActiveLeaf(Transaction transaction) async {
-    final activePath = await _loadActiveMessages(transaction);
-    await transaction.insert(
-      'conversation_state',
-      {
-        'id': 1,
-        'active_leaf_message_id':
-            activePath.isEmpty ? null : activePath.last.id,
-      },
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
   }
 
   @override
@@ -900,496 +1104,93 @@ class SqliteMessageStore implements MessageStore {
   }
 
   @override
-  Future<List<ConversationMemory>> loadConversationMemories() async {
-    final rows = await _database.query(
-      'conversation_memory',
-      orderBy: 'end_at_utc DESC, updated_at_utc DESC',
-    );
-    return rows.map(ConversationMemory.fromMap).toList(growable: false);
-  }
-
-  @override
-  Future<void> saveConversationMemory(ConversationMemory memory) async {
-    await _database.insert(
-      'conversation_memory',
-      memory.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-  }
-
-  @override
-  Future<SaraInnerLife> loadSaraInnerLife() async {
-    final rows = await _database.query(
-      'sara_inner_life',
+  Future<void> saveTerminalCommandActivities(
+    String messageId,
+    List<TerminalCommandHistoryEntry> activities,
+  ) async {
+    final updated = await _database.update(
+      'message',
+      {
+        'terminal_command_data': jsonEncode(
+          activities.map((activity) => activity.toMap()).toList(),
+        ),
+      },
       where: 'id = ?',
-      whereArgs: [1],
-      limit: 1,
+      whereArgs: [messageId],
     );
-    if (rows.isEmpty) {
-      return SaraInnerLife.initial(
-        DateTime.now().toUtc().millisecondsSinceEpoch,
-      );
+    if (updated != 1) {
+      throw StateError('The message for terminal activity is unavailable.');
     }
-    return SaraInnerLife.fromMap(rows.single);
   }
 
   @override
-  Future<SaraInnerLife> loadSaraInnerLifeForPath(
-    List<String> activeMessageIds,
+  Future<void> moveTerminalCommandActivities(
+    String fromMessageId,
+    String toMessageId,
   ) async {
-    if (activeMessageIds.isEmpty) return loadSaraInnerLife();
-    final activeIndex = {
-      for (var index = 0; index < activeMessageIds.length; index++)
-        activeMessageIds[index]: index,
-    };
-    final rows = (await _database.query('sara_inner_life_branch'))
-        .where((row) => activeIndex.containsKey(row['branch_message_id']))
-        .toList();
-    if (rows.isNotEmpty) {
-      rows.sort(
-        (a, b) => activeIndex[a['branch_message_id']]!
-            .compareTo(activeIndex[b['branch_message_id']]!),
-      );
-      return SaraInnerLife.fromMap(rows.last);
-    }
-    final legacy = await loadSaraInnerLife();
-    if (legacy.sourceMessageIds.every(activeMessageIds.contains)) return legacy;
-    return SaraInnerLife.initial(DateTime.now().toUtc().millisecondsSinceEpoch);
-  }
-
-  @override
-  Future<void> saveSaraInnerLife(SaraInnerLife state) async {
-    await _database.insert(
-      'sara_inner_life',
-      state.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-  }
-
-  @override
-  Future<void> saveSaraInnerLifeForBranch(
-    SaraInnerLife state,
-    String branchMessageId,
-  ) async {
-    final values = state.toMap()..remove('id');
-    await _database.insert(
-      'sara_inner_life_branch',
-      {'branch_message_id': branchMessageId, ...values},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-  }
-
-  @override
-  Future<bool> saveSaraInnerLifeIfActiveLeaf(
-    SaraInnerLife state, {
-    required String expectedLeafId,
-  }) async {
-    return _database.transaction((transaction) async {
-      final rows = await transaction.query(
-        'conversation_state',
-        columns: ['active_leaf_message_id'],
-        where: 'id = ?',
-        whereArgs: [1],
-        limit: 1,
-      );
-      final activeLeafId = rows.isEmpty
-          ? null
-          : rows.single['active_leaf_message_id'] as String?;
-      if (activeLeafId != expectedLeafId) return false;
-      final activeMessageIds = (await _loadActiveMessages(transaction))
-          .map((message) => message.id)
-          .toSet();
-      if (!state.sourceMessageIds.every(activeMessageIds.contains)) {
-        return false;
-      }
-      final values = state.toMap()..remove('id');
-      await transaction.insert(
-        'sara_inner_life_branch',
-        {'branch_message_id': expectedLeafId, ...values},
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      return true;
-    });
-  }
-
-  @override
-  Future<List<SaraPrivateThought>> loadPrivateThoughts(
-      {int? limit = 20}) async {
-    if (limit != null && limit <= 0) return const [];
-    final rows = await _database.query(
-      'sara_private_thought',
-      orderBy: 'created_at_utc DESC',
-      limit: limit,
-    );
-    return rows.map(SaraPrivateThought.fromMap).toList(growable: false);
-  }
-
-  @override
-  Future<void> saveTerminalCommandHistory(
-    TerminalCommandHistoryEntry entry,
-  ) async {
+    if (fromMessageId == toMessageId) return;
     await _database.transaction((transaction) async {
-      final whereClauses = [
-        'command = ?',
-        'working_directory = ?',
-        entry.exitCode == null ? 'exit_code IS NULL' : 'exit_code = ?',
-        'stdout = ?',
-        'stderr = ?',
-        entry.error == null ? 'error IS NULL' : 'error = ?',
-        'timed_out = ?',
-        'cancelled = ?',
-        'skipped = ?',
-        'output_truncated = ?',
-      ];
-      final whereArgs = <Object?>[
-        entry.command,
-        entry.workingDirectory,
-        if (entry.exitCode != null) entry.exitCode,
-        entry.stdout,
-        entry.stderr,
-        if (entry.error != null) entry.error,
-        entry.timedOut ? 1 : 0,
-        entry.cancelled ? 1 : 0,
-        entry.skipped ? 1 : 0,
-        entry.outputTruncated ? 1 : 0,
-      ];
-      final matchingRows = await transaction.query(
-        'terminal_command_history',
-        columns: ['id', 'task_context'],
-        where: whereClauses.join(' AND '),
-        whereArgs: whereArgs,
-        orderBy: 'id ASC',
-        limit: 1,
-      );
-
-      late final int historyId;
-      if (matchingRows.isEmpty) {
-        final values = entry.toMap()..remove('id');
-        historyId =
-            await transaction.insert('terminal_command_history', values);
-      } else {
-        final existing = matchingRows.single;
-        historyId = existing['id']! as int;
-        const contextSeparator = '\n\n---\n\n';
-        final existingContext = existing['task_context']! as String;
-        final contexts = existingContext.split(contextSeparator);
-        if (entry.taskContext.isNotEmpty &&
-            !contexts.contains(entry.taskContext)) {
-          contexts.add(entry.taskContext);
-          await transaction.update(
-            'terminal_command_history',
-            {'task_context': contexts.join(contextSeparator)},
-            where: 'id = ?',
-            whereArgs: [historyId],
-          );
-        }
-      }
-
-      final responseMessageId = entry.responseMessageId;
-      if (responseMessageId != null) {
-        await transaction.insert(
-          'terminal_command_activity_link',
-          {
-            'terminal_history_id': historyId,
-            'response_message_id': responseMessageId,
-          },
-          conflictAlgorithm: ConflictAlgorithm.ignore,
-        );
-      }
-    });
-  }
-
-  @override
-  Future<Map<String, List<TerminalCommandHistoryEntry>>>
-      loadTerminalCommandActivities(Set<String> responseMessageIds) async {
-    if (responseMessageIds.isEmpty) return const {};
-    final grouped = <String, List<TerminalCommandHistoryEntry>>{};
-    final ids = responseMessageIds.toList(growable: false);
-    for (var offset = 0; offset < ids.length; offset += 400) {
-      final batch = ids.skip(offset).take(400).toList(growable: false);
-      final placeholders = List.filled(batch.length, '?').join(', ');
-      final directRows = await _database.query(
-        'terminal_command_history',
-        where: 'response_message_id IN ($placeholders)',
-        whereArgs: batch,
-        orderBy: 'created_at_utc ASC, id ASC',
-      );
-      for (final row in directRows) {
-        final responseId = row['response_message_id']! as String;
-        _addTerminalActivity(grouped, responseId, row);
-      }
-
-      final linkedRows = await _database.rawQuery(
-        'SELECT history.*, activity_link.response_message_id '
-        'AS linked_response_message_id '
-        'FROM terminal_command_activity_link AS activity_link '
-        'JOIN terminal_command_history AS history '
-        'ON history.id = activity_link.terminal_history_id '
-        'WHERE activity_link.response_message_id IN ($placeholders) '
-        'ORDER BY history.created_at_utc ASC, history.id ASC',
-        batch,
-      );
-      for (final row in linkedRows) {
-        final responseId = row['linked_response_message_id']! as String;
-        _addTerminalActivity(
-          grouped,
-          responseId,
-          {...row, 'response_message_id': responseId},
-        );
-      }
-    }
-    return grouped;
-  }
-
-  void _addTerminalActivity(
-    Map<String, List<TerminalCommandHistoryEntry>> grouped,
-    String responseId,
-    Map<String, Object?> row,
-  ) {
-    final activities = grouped.putIfAbsent(responseId, () => []);
-    final historyId = row['id'];
-    if (activities.any((activity) => activity.id == historyId)) return;
-    activities.add(TerminalCommandHistoryEntry.fromMap(row));
-  }
-
-  @override
-  Future<List<Map<String, Object?>>> searchTerminalCommandHistory(
-    String query, {
-    int limit = 3,
-  }) async {
-    if (limit <= 0) return const [];
-    final queryTerms = _terminalHistoryTerms(query);
-    if (queryTerms.isEmpty) return const [];
-    final rows = await _database.query(
-      'terminal_command_history',
-      orderBy: 'created_at_utc DESC',
-      limit: 250,
-    );
-    final matches = rows
-        .map((row) {
-          final entry = TerminalCommandHistoryEntry.fromMap(row);
-          final searchable = [
-            entry.taskContext,
-            entry.command,
-            entry.workingDirectory,
-            entry.stdout,
-            entry.stderr,
-            entry.error ?? '',
-          ].join(' ');
-          final score =
-              queryTerms.intersection(_terminalHistoryTerms(searchable)).length;
-          return (entry: entry, score: score);
-        })
-        .where((match) => match.score > 0)
-        .toList()
-      ..sort((a, b) {
-        final score = b.score.compareTo(a.score);
-        return score != 0
-            ? score
-            : b.entry.createdAtUtc.compareTo(a.entry.createdAtUtc);
-      });
-    return matches
-        .take(limit)
-        .map((match) => match.entry.toSearchResult())
-        .toList(growable: false);
-  }
-
-  @override
-  Future<void> savePrivateThought(SaraPrivateThought thought) async {
-    await _database.insert(
-      'sara_private_thought',
-      thought.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-  }
-
-  @override
-  Future<bool> savePrivateThoughtIfSourcesExist(
-    SaraPrivateThought thought,
-  ) async {
-    return _database.transaction((transaction) async {
-      for (final sourceId in thought.sourceMessageIds.toSet()) {
-        final rows = await transaction.query(
-          'message',
-          columns: ['id'],
-          where: 'id = ?',
-          whereArgs: [sourceId],
-          limit: 1,
-        );
-        if (rows.isEmpty) return false;
-      }
-      await transaction.insert(
-        'sara_private_thought',
-        thought.toMap(),
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      return true;
-    });
-  }
-
-  @override
-  Future<bool> savePrivateThoughtIfActiveLeaf(
-    SaraPrivateThought thought, {
-    required String? expectedLeafId,
-  }) async {
-    return _database.transaction((transaction) async {
       final rows = await transaction.query(
-        'conversation_state',
-        columns: ['active_leaf_message_id'],
-        where: 'id = ?',
-        whereArgs: [1],
-        limit: 1,
+        'message',
+        columns: ['id', 'terminal_command_data'],
+        where: 'id IN (?, ?)',
+        whereArgs: [fromMessageId, toMessageId],
       );
-      final activeLeafId = rows.isEmpty
-          ? null
-          : rows.single['active_leaf_message_id'] as String?;
-      if (activeLeafId != expectedLeafId) return false;
-      await transaction.insert(
-        'sara_private_thought',
-        thought.toMap(),
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-      return true;
-    });
-  }
+      final rowsById = {for (final row in rows) row['id']! as String: row};
+      final source = rowsById[fromMessageId];
+      final destination = rowsById[toMessageId];
+      if (source == null || destination == null) {
+        throw StateError('A message for terminal activity is unavailable.');
+      }
 
-  @override
-  Future<List<SaraAutonomyGoal>> loadAutonomyGoalsForPath(
-    List<String> activeMessageIds,
-  ) async {
-    final activeIndex = {
-      for (var index = 0; index < activeMessageIds.length; index++)
-        activeMessageIds[index]: index,
-    };
-    final latestGoals = <String, (int, SaraAutonomyGoal)>{};
-    for (final row in await _database.query('sara_autonomy_goal')) {
-      final goal = SaraAutonomyGoal.fromMap(row);
-      final index =
-          goal.branchMessageId == '' ? -1 : activeIndex[goal.branchMessageId];
-      if (index == null ||
-          !goal.sourceMessageIds.every(activeIndex.containsKey)) {
-        continue;
+      final sourceActivities =
+          jsonDecode(source['terminal_command_data']! as String) as List;
+      if (sourceActivities.isEmpty) return;
+      final destinationActivities =
+          jsonDecode(destination['terminal_command_data']! as String) as List;
+      final signatures = destinationActivities.map(jsonEncode).toSet();
+      for (final activity in sourceActivities) {
+        if (signatures.add(jsonEncode(activity))) {
+          destinationActivities.add(activity);
+        }
       }
-      final current = latestGoals[goal.id];
-      if (current == null || index >= current.$1) {
-        latestGoals[goal.id] = (index, goal);
-      }
-    }
-    return latestGoals.values.map((entry) => entry.$2).toList(growable: false);
-  }
-
-  @override
-  Future<bool> saveAutonomyGoalsForBranch(
-    List<SaraAutonomyGoal> goals,
-    String branchMessageId,
-  ) async {
-    return _database.transaction((transaction) async {
-      final stateRows = await transaction.query(
-        'conversation_state',
-        columns: ['active_leaf_message_id'],
+      await transaction.update(
+        'message',
+        {'terminal_command_data': jsonEncode(destinationActivities)},
         where: 'id = ?',
-        whereArgs: [1],
-        limit: 1,
+        whereArgs: [toMessageId],
       );
-      if (stateRows.isEmpty ||
-          stateRows.single['active_leaf_message_id'] != branchMessageId) {
-        return false;
-      }
-      final activeMessageIds = (await _loadActiveMessages(transaction))
-          .map((message) => message.id)
-          .toSet();
-      for (final goal in goals) {
-        if (goal.branchMessageId != branchMessageId ||
-            goal.title.trim().isEmpty ||
-            goal.description.trim().isEmpty ||
-            !const {'active', 'completed'}.contains(goal.status) ||
-            !goal.sourceMessageIds.every(activeMessageIds.contains)) {
-          throw const FormatException('Sara autonomy goal is invalid.');
-        }
-        for (final sourceId in goal.sourceMessageIds.toSet()) {
-          final rows = await transaction.query(
-            'message',
-            columns: ['id'],
-            where: 'id = ?',
-            whereArgs: [sourceId],
-            limit: 1,
-          );
-          if (rows.isEmpty) return false;
-        }
-        await transaction.insert(
-          'sara_autonomy_goal',
-          goal.toMap(),
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-      }
-      return true;
+      await transaction.update(
+        'message',
+        {'terminal_command_data': '[]'},
+        where: 'id = ?',
+        whereArgs: [fromMessageId],
+      );
     });
   }
 
   @override
   Future<Map<String, int>> loadAssistantFeedback() async {
     final rows = await _database.query(
-      'assistant_feedback',
+      'message',
+      columns: ['id', 'rating'],
       where: 'rating IS NOT NULL',
     );
     return {
-      for (final row in rows)
-        row['response_message_id']! as String: row['rating']! as int,
+      for (final row in rows) row['id']! as String: row['rating']! as int,
     };
   }
 
   @override
   Future<Map<String, String>> loadAssistantReactions() async {
     final rows = await _database.query(
-      'assistant_feedback',
-      columns: ['response_message_id', 'reaction'],
+      'message',
+      columns: ['id', 'reaction'],
       where: 'reaction IS NOT NULL',
     );
     return {
-      for (final row in rows)
-        row['response_message_id']! as String: row['reaction']! as String,
+      for (final row in rows) row['id']! as String: row['reaction']! as String,
     };
-  }
-
-  @override
-  Future<String?> loadFeedbackPreferenceSummary({
-    Set<String>? activeMessageIds,
-  }) async {
-    if (activeMessageIds == null) {
-      final rows = await _database.query(
-        'feedback_preference',
-        columns: ['summary'],
-        where: 'id = ?',
-        whereArgs: [1],
-        limit: 1,
-      );
-      return rows.isEmpty ? null : rows.single['summary']! as String;
-    }
-    final rows = await _database.query('assistant_feedback');
-    final activeRows = rows.where((row) =>
-        row['rating'] != null &&
-        activeMessageIds.contains(row['response_message_id']) &&
-        activeMessageIds.contains(row['user_message_id']));
-    final likes = activeRows.where((row) => row['rating'] == 1).toList();
-    final dislikes = activeRows.where((row) => row['rating'] == -1).toList();
-    final traits = <String>[];
-    void addTrait(String label, String key) {
-      final likedCount = likes.where((row) => row[key] == 1).length;
-      final dislikedCount = dislikes.where((row) => row[key] == 1).length;
-      if (likedCount >= 2 && likedCount - dislikedCount >= 2) {
-        traits.add('often likes $label');
-      } else if (dislikedCount >= 2 && dislikedCount - likedCount >= 2) {
-        traits.add('often dislikes $label');
-      }
-    }
-
-    addTrait('concise replies', 'is_concise');
-    addTrait('structured lists', 'has_list');
-    addTrait('code examples', 'has_code');
-    if (likes.isEmpty && dislikes.isEmpty) return null;
-    return traits.isEmpty
-        ? 'Explicit feedback is mixed or too limited to show a stable style preference.'
-        : 'From repeated explicit feedback, the user ${traits.join(', and ')}. These are weak style signals, not hard rules.';
   }
 
   @override
@@ -1401,64 +1202,21 @@ class SqliteMessageStore implements MessageStore {
     if (rating != null && rating != -1 && rating != 1) {
       throw ArgumentError.value(rating, 'rating', 'Must be -1, 1, or null.');
     }
-
     await _database.transaction((transaction) async {
-      if (rating == null) {
-        final existingRows = await transaction.query(
-          'assistant_feedback',
-          columns: ['reaction'],
-          where: 'response_message_id = ?',
-          whereArgs: [responseMessageId],
-          limit: 1,
-        );
-        if (existingRows.isNotEmpty) {
-          if (existingRows.single['reaction'] == null) {
-            await transaction.delete(
-              'assistant_feedback',
-              where: 'response_message_id = ?',
-              whereArgs: [responseMessageId],
-            );
-          } else {
-            await transaction.update(
-              'assistant_feedback',
-              {
-                'rating': null,
-                'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
-              },
-              where: 'response_message_id = ?',
-              whereArgs: [responseMessageId],
-            );
-          }
-        }
-      } else {
-        final content = await _validateFeedbackMessages(
-          transaction,
-          userMessageId,
-          responseMessageId,
-        );
-        final existingRows = await transaction.query(
-          'assistant_feedback',
-          columns: ['reaction'],
-          where: 'response_message_id = ?',
-          whereArgs: [responseMessageId],
-          limit: 1,
-        );
-        final features = _feedbackFeatures(content);
-        await transaction.insert(
-          'assistant_feedback',
-          {
-            'response_message_id': responseMessageId,
-            'user_message_id': userMessageId,
-            'rating': rating,
-            'reaction':
-                existingRows.isEmpty ? null : existingRows.single['reaction'],
-            ...features,
-            'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
+      await _validateFeedbackMessages(
+        transaction,
+        userMessageId,
+        responseMessageId,
+      );
+      final updated = await transaction.update(
+        'message',
+        {'rating': rating},
+        where: 'id = ?',
+        whereArgs: [responseMessageId],
+      );
+      if (updated != 1) {
+        throw StateError('The rated message is no longer available.');
       }
-      await _refreshFeedbackPreference(transaction);
     });
   }
 
@@ -1470,63 +1228,38 @@ class SqliteMessageStore implements MessageStore {
   ) async {
     if (reaction != null && reaction.trim().isEmpty) {
       throw ArgumentError.value(
-          reaction, 'reaction', 'Must be an emoji or null.');
+        reaction,
+        'reaction',
+        'Must be an emoji or null.',
+      );
     }
 
-    await _database.transaction((transaction) async {
-      final existingRows = await transaction.query(
-        'assistant_feedback',
-        columns: ['rating'],
-        where: 'response_message_id = ?',
-        whereArgs: [responseMessageId],
-        limit: 1,
+    if (reaction != null && reaction.trim().isEmpty) {
+      throw ArgumentError.value(
+        reaction,
+        'reaction',
+        'Must be an emoji or null.',
       );
-      if (reaction == null) {
-        if (existingRows.isNotEmpty) {
-          if (existingRows.single['rating'] == null) {
-            await transaction.delete(
-              'assistant_feedback',
-              where: 'response_message_id = ?',
-              whereArgs: [responseMessageId],
-            );
-          } else {
-            await transaction.update(
-              'assistant_feedback',
-              {
-                'reaction': null,
-                'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
-              },
-              where: 'response_message_id = ?',
-              whereArgs: [responseMessageId],
-            );
-          }
-        }
-      } else {
-        final content = await _validateFeedbackMessages(
-          transaction,
-          userMessageId,
-          responseMessageId,
-        );
-        await transaction.insert(
-          'assistant_feedback',
-          {
-            'response_message_id': responseMessageId,
-            'user_message_id': userMessageId,
-            'rating': existingRows.isEmpty
-                ? null
-                : existingRows.single['rating'] as int?,
-            'reaction': reaction,
-            ..._feedbackFeatures(content),
-            'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
-          },
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
+    }
+    await _database.transaction((transaction) async {
+      await _validateFeedbackMessages(
+        transaction,
+        userMessageId,
+        responseMessageId,
+      );
+      final updated = await transaction.update(
+        'message',
+        {'reaction': reaction},
+        where: 'id = ?',
+        whereArgs: [responseMessageId],
+      );
+      if (updated != 1) {
+        throw StateError('The reacted message is no longer available.');
       }
-      await _refreshFeedbackPreference(transaction);
     });
   }
 
-  static Future<String> _validateFeedbackMessages(
+  static Future<void> _validateFeedbackMessages(
     Transaction transaction,
     String userMessageId,
     String responseMessageId,
@@ -1540,7 +1273,7 @@ class SqliteMessageStore implements MessageStore {
     );
     final responseRows = await transaction.query(
       'message',
-      columns: ['role', 'content', 'created_at_utc'],
+      columns: ['role', 'created_at_utc'],
       where: 'id = ?',
       whereArgs: [responseMessageId],
       limit: 1,
@@ -1553,65 +1286,6 @@ class SqliteMessageStore implements MessageStore {
             (responseRows.single['created_at_utc']! as int)) {
       throw StateError(
         'Feedback must reference a stored user message and AI response.',
-      );
-    }
-    return responseRows.single['content']! as String;
-  }
-
-  static Map<String, int> _feedbackFeatures(String content) {
-    final normalized = content.trim();
-    return {
-      'is_concise': normalized.runes.length <= 320 ? 1 : 0,
-      'has_list':
-          RegExp(r'^\s*(?:[-*•]|\d+[.)])\s', multiLine: true).hasMatch(content)
-              ? 1
-              : 0,
-      'has_code':
-          content.contains('```') || RegExp(r'`[^`]+`').hasMatch(content)
-              ? 1
-              : 0,
-    };
-  }
-
-  static Future<void> _refreshFeedbackPreference(
-    Transaction transaction,
-  ) async {
-    final rows = (await transaction.query('assistant_feedback'))
-        .where((row) => row['rating'] != null)
-        .toList(growable: false);
-    final likes = rows.where((row) => row['rating'] == 1).toList();
-    final dislikes = rows.where((row) => row['rating'] == -1).toList();
-    final traits = <String>[];
-    void addTrait(String label, String key) {
-      final likedCount = likes.where((row) => row[key] == 1).length;
-      final dislikedCount = dislikes.where((row) => row[key] == 1).length;
-      if (likedCount >= 2 && likedCount - dislikedCount >= 2) {
-        traits.add('often likes $label');
-      } else if (dislikedCount >= 2 && dislikedCount - likedCount >= 2) {
-        traits.add('often dislikes $label');
-      }
-    }
-
-    addTrait('concise replies', 'is_concise');
-    addTrait('structured lists', 'has_list');
-    addTrait('code examples', 'has_code');
-    final summary = rows.isEmpty
-        ? ''
-        : traits.isEmpty
-            ? 'Explicit feedback is mixed or too limited to show a stable style preference.'
-            : 'From repeated explicit feedback, the user ${traits.join(', and ')}. These are weak style signals, not hard rules.';
-    if (summary.isEmpty) {
-      await transaction
-          .delete('feedback_preference', where: 'id = ?', whereArgs: [1]);
-    } else {
-      await transaction.insert(
-        'feedback_preference',
-        {
-          'id': 1,
-          'summary': summary,
-          'updated_at_utc': DateTime.now().toUtc().millisecondsSinceEpoch,
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
       );
     }
   }
@@ -1668,13 +1342,11 @@ class SqliteMessageStore implements MessageStore {
       );
       final parentId = message.parentMessageId;
       if (parentId != null) {
-        await transaction.insert(
-          'active_child',
-          {'parent_message_id': parentId, 'child_message_id': message.id},
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
+        await transaction.insert('active_child', {
+          'parent_message_id': parentId,
+          'child_message_id': message.id,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
-      await _updateActiveLeaf(transaction);
     });
   }
 
@@ -1684,16 +1356,8 @@ class SqliteMessageStore implements MessageStore {
     required String? expectedLeafId,
   }) async {
     return _database.transaction((transaction) async {
-      final rows = await transaction.query(
-        'conversation_state',
-        columns: ['active_leaf_message_id'],
-        where: 'id = ?',
-        whereArgs: [1],
-        limit: 1,
-      );
-      final activeLeafId = rows.isEmpty
-          ? null
-          : rows.single['active_leaf_message_id'] as String?;
+      final activePath = await _loadActiveMessages(transaction);
+      final activeLeafId = activePath.isEmpty ? null : activePath.last.id;
       if (activeLeafId != expectedLeafId ||
           message.parentMessageId != expectedLeafId) {
         return false;
@@ -1705,13 +1369,11 @@ class SqliteMessageStore implements MessageStore {
       );
       final parentId = message.parentMessageId;
       if (parentId != null) {
-        await transaction.insert(
-          'active_child',
-          {'parent_message_id': parentId, 'child_message_id': message.id},
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
+        await transaction.insert('active_child', {
+          'parent_message_id': parentId,
+          'child_message_id': message.id,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
-      await _updateActiveLeaf(transaction);
       return true;
     });
   }
@@ -1748,14 +1410,12 @@ class SqliteMessageStore implements MessageStore {
         );
         final parentId = message.parentMessageId;
         if (parentId != null) {
-          await transaction.insert(
-            'active_child',
-            {'parent_message_id': parentId, 'child_message_id': message.id},
-            conflictAlgorithm: ConflictAlgorithm.replace,
-          );
+          await transaction.insert('active_child', {
+            'parent_message_id': parentId,
+            'child_message_id': message.id,
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
         }
       }
-      await _updateActiveLeaf(transaction);
     });
   }
 
@@ -1776,11 +1436,10 @@ class SqliteMessageStore implements MessageStore {
         );
         final parentId = message.parentMessageId;
         if (parentId != null) {
-          await transaction.insert(
-            'active_child',
-            {'parent_message_id': parentId, 'child_message_id': message.id},
-            conflictAlgorithm: ConflictAlgorithm.replace,
-          );
+          await transaction.insert('active_child', {
+            'parent_message_id': parentId,
+            'child_message_id': message.id,
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
         }
       }
       final attachmentsByMessage = <String, List<ChatAttachment>>{
@@ -1801,7 +1460,312 @@ class SqliteMessageStore implements MessageStore {
           );
         }
       }
-      await _updateActiveLeaf(transaction);
+    });
+  }
+
+  @override
+  Future<List<ConversationTopicSummary>>
+  loadConversationTopicSummaries() async {
+    final rows = await _database.query('conversation_topic');
+    return rows
+        .map((row) => ConversationTopicSummary.fromMap(row))
+        .toList(growable: false);
+  }
+
+  @override
+  Future<List<MessageEmbeddingRecord>> loadMessageEmbeddings() async {
+    final rows = await _database.query('message_embedding');
+    return _decodeMessageEmbeddingRows(rows);
+  }
+
+  @override
+  Future<List<MessageEmbeddingRecord>> loadMessageEmbeddingsForMessages(
+    List<String> messageIds,
+  ) async {
+    final rows = <Map<String, Object?>>[];
+    for (var offset = 0; offset < messageIds.length; offset += 500) {
+      final batch = messageIds.skip(offset).take(500).toList(growable: false);
+      rows.addAll(
+        await _database.query(
+          'message_embedding',
+          where: 'message_id IN (${List.filled(batch.length, '?').join(', ')})',
+          whereArgs: batch,
+        ),
+      );
+    }
+    return _decodeMessageEmbeddingRows(rows);
+  }
+
+  @override
+  Future<List<ConversationTopicEmbeddingRecord>>
+  loadConversationTopicEmbeddings() async {
+    final rows = await _database.query('conversation_topic_embedding');
+    return rows
+        .map((row) {
+          final decoded = jsonDecode(row['embedding']! as String);
+          if (decoded is! List ||
+              decoded.isEmpty ||
+              decoded.any(
+                (value) => value is! num || !value.toDouble().isFinite,
+              )) {
+            throw const FormatException(
+              'Stored conversation topic embedding is invalid.',
+            );
+          }
+          return ConversationTopicEmbeddingRecord(
+            topicId: row['topic_id']! as String,
+            model: row['model']! as String,
+            values: decoded.map((value) => (value as num).toDouble()).toList(),
+            createdAtUtc: row['created_at_utc']! as int,
+          );
+        })
+        .toList(growable: false);
+  }
+
+  @override
+  Future<List<UserMemoryRecord>> loadUserMemories() async {
+    final rows = await _database.query('user_memory');
+    return rows
+        .map((row) => UserMemoryRecord.fromMap(row))
+        .toList(growable: false);
+  }
+
+  @override
+  Future<List<ConversationMemoryJob>> loadConversationMemoryJobs() async {
+    final rows = await _database.query(
+      'background_memory_job',
+      orderBy: 'queued_at_utc ASC',
+    );
+    return rows
+        .map((row) => ConversationMemoryJob.fromMap(row))
+        .toList(growable: false);
+  }
+
+  @override
+  Future<void> enqueueConversationMemoryJob(ConversationMemoryJob job) async {
+    await _database.transaction((transaction) async {
+      final userMessage = await transaction.query(
+        'message',
+        columns: ['role'],
+        where: 'id = ?',
+        whereArgs: [job.userMessageId],
+        limit: 1,
+      );
+      if (userMessage.isEmpty || userMessage.single['role'] != 'user') {
+        throw StateError(
+          'Cannot queue memory work for a missing user message.',
+        );
+      }
+      if (job.modelMessageId != null) {
+        final modelMessage = await transaction.query(
+          'message',
+          columns: ['role', 'parent_message_id'],
+          where: 'id = ?',
+          whereArgs: [job.modelMessageId],
+          limit: 1,
+        );
+        if (modelMessage.isEmpty ||
+            modelMessage.single['role'] != 'model' ||
+            modelMessage.single['parent_message_id'] != job.userMessageId) {
+          throw StateError(
+            'Cannot queue memory work for an unrelated model response.',
+          );
+        }
+      }
+      await transaction.insert(
+        'background_memory_job',
+        job.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+    });
+  }
+
+  @override
+  Future<void> deleteConversationMemoryJobs(List<String> jobIds) async {
+    for (var offset = 0; offset < jobIds.length; offset += 500) {
+      final batch = jobIds.skip(offset).take(500).toList(growable: false);
+      if (batch.isEmpty) continue;
+      await _database.delete(
+        'background_memory_job',
+        where: 'id IN (${List.filled(batch.length, '?').join(', ')})',
+        whereArgs: batch,
+      );
+    }
+  }
+
+  static List<MessageEmbeddingRecord> _decodeMessageEmbeddingRows(
+    List<Map<String, Object?>> rows,
+  ) {
+    return rows
+        .map((row) {
+          final decoded = jsonDecode(row['embedding']! as String);
+          if (decoded is! List ||
+              decoded.isEmpty ||
+              decoded.any(
+                (value) => value is! num || !value.toDouble().isFinite,
+              )) {
+            throw const FormatException(
+              'Stored conversation embedding is invalid.',
+            );
+          }
+          return MessageEmbeddingRecord(
+            messageId: row['message_id']! as String,
+            topicId: row['topic_id'] as String?,
+            model: row['model']! as String,
+            values: decoded.map((value) => (value as num).toDouble()).toList(),
+            createdAtUtc: row['created_at_utc']! as int,
+          );
+        })
+        .toList(growable: false);
+  }
+
+  @override
+  Future<void> saveMessageEmbeddings(
+    List<MessageEmbeddingRecord> embeddings,
+  ) async {
+    await _database.transaction((transaction) async {
+      for (final embedding in embeddings) {
+        final message = await transaction.query(
+          'message',
+          columns: ['id'],
+          where: 'id = ?',
+          whereArgs: [embedding.messageId],
+          limit: 1,
+        );
+        if (message.isEmpty) continue;
+        await transaction.insert('message_embedding', {
+          'message_id': embedding.messageId,
+          'topic_id': embedding.topicId,
+          'model': embedding.model,
+          'embedding': jsonEncode(embedding.values),
+          'created_at_utc': embedding.createdAtUtc,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
+  @override
+  Future<void> saveConversationTopicEmbeddings(
+    List<ConversationTopicEmbeddingRecord> embeddings,
+  ) async {
+    await _database.transaction((transaction) async {
+      for (final embedding in embeddings) {
+        final topic = await transaction.query(
+          'conversation_topic',
+          columns: ['id'],
+          where: 'id = ?',
+          whereArgs: [embedding.topicId],
+          limit: 1,
+        );
+        if (topic.isEmpty) continue;
+        await transaction.insert('conversation_topic_embedding', {
+          'topic_id': embedding.topicId,
+          'model': embedding.model,
+          'embedding': jsonEncode(embedding.values),
+          'created_at_utc': embedding.createdAtUtc,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+    });
+  }
+
+  @override
+  Future<void> saveConversationMemory({
+    required ConversationTopicSummary topic,
+    required List<MessageEmbeddingRecord> embeddings,
+    List<String> topicSourceMessageIds = const [],
+    List<ConversationTopicEmbeddingRecord> topicEmbeddings = const [],
+    List<UserMemoryRecord> userMemories = const [],
+    List<String> completedJobIds = const [],
+    List<String> deletedMemoryIds = const [],
+  }) async {
+    await _database.transaction((transaction) async {
+      final throughMessage = await transaction.query(
+        'message',
+        columns: ['id'],
+        where: 'id = ?',
+        whereArgs: [topic.throughMessageId],
+        limit: 1,
+      );
+      if (throughMessage.isEmpty) return;
+      await transaction.insert(
+        'conversation_topic',
+        topic.toMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      for (final messageId in topicSourceMessageIds.toSet()) {
+        await transaction.update(
+          'message_embedding',
+          {'topic_id': topic.id},
+          where: 'message_id = ? AND topic_id IS NULL',
+          whereArgs: [messageId],
+        );
+      }
+      for (final embedding in embeddings) {
+        final message = await transaction.query(
+          'message',
+          columns: ['id'],
+          where: 'id = ?',
+          whereArgs: [embedding.messageId],
+          limit: 1,
+        );
+        if (message.isEmpty) continue;
+        await transaction.insert('message_embedding', {
+          'message_id': embedding.messageId,
+          'topic_id': embedding.topicId,
+          'model': embedding.model,
+          'embedding': jsonEncode(embedding.values),
+          'created_at_utc': embedding.createdAtUtc,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+      for (final embedding in topicEmbeddings) {
+        if (embedding.topicId != topic.id) continue;
+        await transaction.insert('conversation_topic_embedding', {
+          'topic_id': embedding.topicId,
+          'model': embedding.model,
+          'embedding': jsonEncode(embedding.values),
+          'created_at_utc': embedding.createdAtUtc,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+      }
+      for (final memory in userMemories) {
+        if (memory.sourceMessageIds.isEmpty ||
+            memory.sourceMessageIds.toSet().length !=
+                memory.sourceMessageIds.length) {
+          throw StateError('Cannot save user memory without unique evidence.');
+        }
+        for (final sourceMessageId in memory.sourceMessageIds.toSet()) {
+          final sourceMessage = await transaction.query(
+            'message',
+            columns: ['role'],
+            where: 'id = ?',
+            whereArgs: [sourceMessageId],
+            limit: 1,
+          );
+          if (sourceMessage.isEmpty || sourceMessage.single['role'] != 'user') {
+            throw StateError(
+              'Cannot save user memory without user-authored evidence.',
+            );
+          }
+        }
+        await transaction.insert(
+          'user_memory',
+          memory.toMap(),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      for (final memoryId in deletedMemoryIds.toSet()) {
+        await transaction.delete(
+          'user_memory',
+          where: 'id = ?',
+          whereArgs: [memoryId],
+        );
+      }
+      for (final jobId in completedJobIds.toSet()) {
+        await transaction.delete(
+          'background_memory_job',
+          where: 'id = ?',
+          whereArgs: [jobId],
+        );
+      }
     });
   }
 
@@ -1814,239 +1778,64 @@ class SqliteMessageStore implements MessageStore {
   Future<void> deleteMessages(List<String> ids) async {
     if (ids.isEmpty) return;
     await _database.transaction((transaction) async {
+      final affectedTopicIds = <String>{};
       final deletedIds = ids.toSet();
-      final parentById = <String, String?>{};
-      for (var offset = 0; offset < ids.length; offset += 400) {
-        final batch = ids.skip(offset).take(400).toList(growable: false);
-        final placeholders = List.filled(batch.length, '?').join(', ');
-        for (final row in await transaction.query(
-          'message',
-          columns: ['id', 'parent_message_id'],
-          where: 'id IN ($placeholders)',
-          whereArgs: batch,
-        )) {
-          parentById[row['id']! as String] =
-              row['parent_message_id'] as String?;
-        }
-      }
-
-      String? retainedBranch(String branchId) {
-        var current = branchId;
-        while (deletedIds.contains(current)) {
-          final parentId = parentById[current];
-          if (parentId == null) return null;
-          current = parentId;
-        }
-        return current;
-      }
-
-      final memories = await transaction.query('conversation_memory');
+      final memories = await transaction.query('user_memory');
       for (final row in memories) {
-        final memory = ConversationMemory.fromMap(row);
-        if (memory.sourceMessageIds.any(deletedIds.contains)) {
+        final memory = UserMemoryRecord.fromMap(row);
+        if (!memory.sourceMessageIds.any(deletedIds.contains)) continue;
+        final retainedSources = memory.sourceMessageIds
+            .where((id) => !deletedIds.contains(id))
+            .toList(growable: false);
+        if (retainedSources.isEmpty) {
           await transaction.delete(
-            'conversation_memory',
+            'user_memory',
+            where: 'id = ?',
+            whereArgs: [memory.id],
+          );
+        } else {
+          await transaction.update(
+            'user_memory',
+            {'source_message_ids': jsonEncode(retainedSources)},
             where: 'id = ?',
             whereArgs: [memory.id],
           );
         }
       }
-
-      final innerLifeRows = await transaction.query(
-        'sara_inner_life',
-        where: 'id = ?',
-        whereArgs: [1],
-      );
-      SaraInnerLife? preservedInnerLife;
-      if (innerLifeRows.isNotEmpty) {
-        final innerLife = SaraInnerLife.fromMap(innerLifeRows.single);
-        if (innerLife.sourceMessageIds.any(deletedIds.contains)) {
-          preservedInnerLife = SaraInnerLife(
-            mood: innerLife.mood,
-            moodIntensity: innerLife.moodIntensity,
-            energy: innerLife.energy,
-            drives: innerLife.drives,
-            selfReflection: innerLife.selfReflection,
-            sourceMessageIds: innerLife.sourceMessageIds
-                .where((id) => !deletedIds.contains(id))
-                .toList(growable: false),
-            updatedAtUtc: innerLife.updatedAtUtc,
-          );
-          await transaction.insert(
-            'sara_inner_life',
-            preservedInnerLife.toMap(),
-            conflictAlgorithm: ConflictAlgorithm.replace,
-          );
-        }
-      }
-
-      final innerLifeCheckpoints =
-          await transaction.query('sara_inner_life_branch');
-      for (final row in innerLifeCheckpoints) {
-        final state = SaraInnerLife.fromMap(row);
-        final branchId = row['branch_message_id']! as String;
-        final affected = deletedIds.contains(branchId) ||
-            state.sourceMessageIds.any(deletedIds.contains);
-        if (!affected) continue;
-
-        final retainedState = SaraInnerLife(
-          mood: state.mood,
-          moodIntensity: state.moodIntensity,
-          energy: state.energy,
-          drives: state.drives,
-          selfReflection: state.selfReflection,
-          sourceMessageIds: state.sourceMessageIds
-              .where((id) => !deletedIds.contains(id))
-              .toList(growable: false),
-          updatedAtUtc: state.updatedAtUtc,
-        );
-        if (deletedIds.contains(branchId)) {
-          final retainedBranchId = retainedBranch(branchId);
-          await transaction.delete(
-            'sara_inner_life_branch',
-            where: 'branch_message_id = ?',
-            whereArgs: [branchId],
-          );
-          if (retainedBranchId == null) {
-            if (preservedInnerLife == null ||
-                retainedState.updatedAtUtc > preservedInnerLife.updatedAtUtc) {
-              preservedInnerLife = retainedState;
-            }
-          } else {
-            final existingRows = await transaction.query(
-              'sara_inner_life_branch',
-              where: 'branch_message_id = ?',
-              whereArgs: [retainedBranchId],
-              limit: 1,
-            );
-            final existingState = existingRows.isEmpty
-                ? null
-                : SaraInnerLife.fromMap(existingRows.single);
-            if (existingState == null ||
-                retainedState.updatedAtUtc > existingState.updatedAtUtc) {
-              final values = retainedState.toMap()..remove('id');
-              await transaction.insert(
-                'sara_inner_life_branch',
-                {'branch_message_id': retainedBranchId, ...values},
-                conflictAlgorithm: ConflictAlgorithm.replace,
-              );
-            }
-          }
-        } else {
-          final existingRows = await transaction.query(
-            'sara_inner_life_branch',
-            where: 'branch_message_id = ?',
-            whereArgs: [branchId],
-            limit: 1,
-          );
-          if (existingRows.isEmpty ||
-              (existingRows.single['updated_at_utc']! as int) <=
-                  retainedState.updatedAtUtc) {
-            await transaction.update(
-              'sara_inner_life_branch',
-              retainedState.toMap()..remove('id'),
-              where: 'branch_message_id = ?',
-              whereArgs: [branchId],
-            );
-          }
-        }
-      }
-      if (preservedInnerLife != null) {
-        await transaction.insert(
-          'sara_inner_life',
-          preservedInnerLife.toMap(),
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-      }
-
-      final thoughts = await transaction.query('sara_private_thought');
-      for (final row in thoughts) {
-        final thought = SaraPrivateThought.fromMap(row);
-        if (!thought.sourceMessageIds.any(deletedIds.contains)) continue;
-        await transaction.insert(
-          'sara_private_thought',
-          SaraPrivateThought(
-            id: thought.id,
-            reflection: thought.reflection,
-            action: thought.action,
-            isRemembered: thought.isRemembered,
-            sourceMessageIds: thought.sourceMessageIds
-                .where((id) => !deletedIds.contains(id))
-                .toList(growable: false),
-            createdAtUtc: thought.createdAtUtc,
-          ).toMap(),
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-      }
-
-      final goals = await transaction.query('sara_autonomy_goal');
-      for (final row in goals) {
-        final goal = SaraAutonomyGoal.fromMap(row);
-        final branchId = goal.branchMessageId!;
-        final branchDeleted = deletedIds.contains(branchId);
-        if (!branchDeleted && !goal.sourceMessageIds.any(deletedIds.contains)) {
-          continue;
-        }
-        final retainedGoal = SaraAutonomyGoal(
-          id: goal.id,
-          title: goal.title,
-          description: goal.description,
-          status: goal.status,
-          sourceMessageIds: goal.sourceMessageIds
-              .where((id) => !deletedIds.contains(id))
-              .toList(growable: false),
-          updatedAtUtc: goal.updatedAtUtc,
-          branchMessageId:
-              branchDeleted ? retainedBranch(branchId) ?? '' : branchId,
-        );
-        if (branchDeleted) {
-          await transaction.delete(
-            'sara_autonomy_goal',
-            where: 'id = ? AND branch_message_id = ?',
-            whereArgs: [goal.id, branchId],
-          );
-        }
-        final targetRows = await transaction.query(
-          'sara_autonomy_goal',
-          where: 'id = ? AND branch_message_id = ?',
-          whereArgs: [goal.id, retainedGoal.branchMessageId],
-          limit: 1,
-        );
-        if (targetRows.isNotEmpty &&
-            (targetRows.single['updated_at_utc']! as int) >
-                retainedGoal.updatedAtUtc) {
-          if (branchDeleted) {
-            await transaction.delete(
-              'sara_autonomy_goal',
-              where: 'id = ? AND branch_message_id = ?',
-              whereArgs: [goal.id, branchId],
-            );
-          }
-          continue;
-        }
-        await transaction.insert(
-          'sara_autonomy_goal',
-          retainedGoal.toMap(),
-          conflictAlgorithm: ConflictAlgorithm.replace,
-        );
-      }
-
-      for (var offset = 0; offset < ids.length; offset += 400) {
-        final batch = ids.skip(offset).take(400).toList(growable: false);
-        final placeholders = List.filled(batch.length, '?').join(', ');
-        await transaction.delete(
-          'assistant_feedback',
-          where: 'response_message_id IN ($placeholders) '
-              'OR user_message_id IN ($placeholders)',
-          whereArgs: [...batch, ...batch],
-        );
-      }
-
       for (final id in ids) {
+        final topics = await transaction.query(
+          'conversation_topic',
+          columns: ['id'],
+          where: 'through_message_id = ?',
+          whereArgs: [id],
+        );
+        for (final row in topics) {
+          affectedTopicIds.add(row['id']! as String);
+        }
+        final embeddings = await transaction.query(
+          'message_embedding',
+          columns: ['topic_id'],
+          where: 'message_id = ?',
+          whereArgs: [id],
+        );
+        for (final row in embeddings) {
+          final topicId = row['topic_id'];
+          if (topicId is String) affectedTopicIds.add(topicId);
+        }
+        await transaction.delete(
+          'message_embedding',
+          where: 'message_id = ?',
+          whereArgs: [id],
+        );
         await transaction.delete(
           'message_attachment',
           where: 'message_id = ?',
           whereArgs: [id],
+        );
+        await transaction.delete(
+          'background_memory_job',
+          where: 'user_message_id = ? OR model_message_id = ?',
+          whereArgs: [id, id],
         );
         await transaction.delete('message', where: 'id = ?', whereArgs: [id]);
       }
@@ -2057,8 +1846,33 @@ class SqliteMessageStore implements MessageStore {
           whereArgs: [id, id],
         );
       }
-      await _refreshFeedbackPreference(transaction);
-      await _updateActiveLeaf(transaction);
+      for (final topicId in affectedTopicIds) {
+        await transaction.update(
+          'message_embedding',
+          {'topic_id': null},
+          where: 'topic_id = ?',
+          whereArgs: [topicId],
+        );
+        await transaction.delete(
+          'conversation_topic_embedding',
+          where: 'topic_id = ?',
+          whereArgs: [topicId],
+        );
+        await transaction.delete(
+          'conversation_topic',
+          where: 'id = ?',
+          whereArgs: [topicId],
+        );
+      }
+      for (var offset = 0; offset < ids.length; offset += 500) {
+        final batch = ids.skip(offset).take(500).toList(growable: false);
+        final placeholders = List.filled(batch.length, '?').join(', ');
+        await transaction.delete(
+          'conversation_topic',
+          where: 'through_message_id IN ($placeholders)',
+          whereArgs: batch,
+        );
+      }
     });
   }
 
@@ -2076,11 +1890,10 @@ class SqliteMessageStore implements MessageStore {
 
   @override
   Future<void> writePersonalName(String name) async {
-    await _database.insert(
-      'personal',
-      {'id': 1, 'name': name},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    await _database.insert('personal', {
+      'id': 1,
+      'name': name,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
   @override
@@ -2091,21 +1904,14 @@ class SqliteMessageStore implements MessageStore {
   @override
   Future<void> clearMessages() async {
     await _database.transaction((transaction) async {
+      await transaction.delete('message_embedding');
+      await transaction.delete('conversation_topic_embedding');
+      await transaction.delete('conversation_topic');
+      await transaction.delete('user_memory');
+      await transaction.delete('background_memory_job');
       await transaction.delete('message_attachment');
       await transaction.delete('message');
       await transaction.delete('active_child');
-      await transaction.delete('conversation_state');
-      await transaction.insert('conversation_state', {
-        'id': 1,
-        'active_leaf_message_id': null,
-      });
-      await transaction.delete('conversation_memory');
-      await transaction.delete('sara_inner_life');
-      await transaction.delete('sara_inner_life_branch');
-      await transaction.delete('sara_private_thought');
-      await transaction.delete('sara_autonomy_goal');
-      await transaction.delete('assistant_feedback');
-      await transaction.delete('feedback_preference');
     });
   }
 
@@ -2125,58 +1931,228 @@ class SqliteMessageStore implements MessageStore {
     Map<String, Object?> tables, {
     required Map<String, String> clipboardPaths,
   }) async {
-    if (tables.keys.toSet().difference(_backupTables.toSet()).isNotEmpty ||
-        _backupTables.any(
-          (table) =>
-              table != 'sara_private_thought' &&
-              table != 'sara_autonomy_goal' &&
-              table != 'terminal_command_history' &&
-              table != 'terminal_command_activity_link' &&
-              tables[table] is! List,
+    const legacyAiTables = {
+      'conversation_memory',
+      'sara_private_thought',
+      'sara_autonomy_goal',
+      'assistant_feedback',
+      'feedback_preference',
+      'sara_inner_life',
+      'sara_inner_life_branch',
+    };
+    const legacySchemaTables = {
+      'conversation_state',
+      'terminal_command_activity_link',
+      'terminal_command_history',
+    };
+    if (tables.keys.toSet().difference({
+          ..._backupTables,
+          ...legacyAiTables,
+          ...legacySchemaTables,
+        }).isNotEmpty ||
+        _requiredBackupTables.any((table) => tables[table] is! List) ||
+        _backupTables
+            .where((table) => !_requiredBackupTables.contains(table))
+            .any(
+              (table) => tables.containsKey(table) && tables[table] is! List,
+            ) ||
+        legacyAiTables.any(
+          (table) => tables.containsKey(table) && tables[table] is! List,
         ) ||
-        (tables.containsKey('sara_private_thought') &&
-            tables['sara_private_thought'] is! List) ||
-        (tables.containsKey('sara_autonomy_goal') &&
-            tables['sara_autonomy_goal'] is! List) ||
-        (tables.containsKey('terminal_command_history') &&
-            tables['terminal_command_history'] is! List) ||
-        (tables.containsKey('terminal_command_activity_link') &&
-            tables['terminal_command_activity_link'] is! List)) {
+        legacySchemaTables.any(
+          (table) => tables.containsKey(table) && tables[table] is! List,
+        )) {
       throw const FormatException('Backup database tables are invalid.');
     }
 
     final rowsByTable = <String, List<Map<String, Object?>>>{};
     for (final table in _backupTables) {
       final rawRows = tables[table] as List? ?? const [];
-      final rows = rawRows.map((row) {
-        if (row is! Map ||
-            row.keys.any((key) => key is! String) ||
-            row.values.any(
-              (value) =>
-                  value != null &&
-                  value is! String &&
-                  value is! int &&
-                  value is! double &&
-                  value is! bool,
-            )) {
-          throw FormatException('Backup rows for "$table" are invalid.');
-        }
-        return Map<String, Object?>.from(row);
-      }).toList(growable: false);
+      final rows = rawRows
+          .map((row) {
+            if (row is! Map ||
+                row.keys.any((key) => key is! String) ||
+                row.values.any(
+                  (value) =>
+                      value != null &&
+                      value is! String &&
+                      value is! int &&
+                      value is! double &&
+                      value is! bool,
+                )) {
+              throw FormatException('Backup rows for "$table" are invalid.');
+            }
+            return Map<String, Object?>.from(row);
+          })
+          .toList(growable: table == 'message');
       rowsByTable[table] = rows;
     }
 
     final messages = rowsByTable['message']!;
+    for (final row in messages) {
+      row.remove('type');
+      row.putIfAbsent('terminal_command_data', () => '[]');
+    }
     final messageIds = messages.map((row) => row['id']).toSet();
     final messageRows = {for (final row in messages) row['id']: row};
     for (final row in messages) {
       if (row['id'] is! String) {
         throw const FormatException('Backup contains an invalid message ID.');
       }
+      if ((row['rating'] != null && ![-1, 1].contains(row['rating'])) ||
+          (row['reaction'] != null && row['reaction'] is! String)) {
+        throw const FormatException(
+          'Backup contains invalid message feedback.',
+        );
+      }
       final parentId = row['parent_message_id'];
       if (parentId != null && !messageIds.contains(parentId)) {
         throw const FormatException(
-            'Backup contains a missing message parent.');
+          'Backup contains a missing message parent.',
+        );
+      }
+    }
+    final topicRows = rowsByTable['conversation_topic']!;
+    final topicIds = <Object?>{};
+    for (final row in topicRows) {
+      row.putIfAbsent('background_state', () => '{}');
+      if (row['background_state'] is! String) {
+        throw const FormatException(
+          'Backup contains invalid conversation topic state.',
+        );
+      }
+      Object? backgroundState;
+      try {
+        backgroundState = jsonDecode(row['background_state']! as String);
+      } on FormatException {
+        throw const FormatException(
+          'Backup contains invalid conversation topic state.',
+        );
+      }
+      if (row['id'] is! String ||
+          row['title'] is! String ||
+          row['summary'] is! String ||
+          row['through_message_id'] is! String ||
+          !messageIds.contains(row['through_message_id']) ||
+          row['updated_at_utc'] is! int ||
+          backgroundState is! Map ||
+          backgroundState.keys.any((key) => key is! String) ||
+          !topicIds.add(row['id'])) {
+        throw const FormatException(
+          'Backup contains an invalid conversation topic summary.',
+        );
+      }
+    }
+    final embeddingKeys = <(Object?, Object?)>{};
+    for (final row in rowsByTable['message_embedding']!) {
+      if (row['message_id'] is! String ||
+          !messageIds.contains(row['message_id']) ||
+          (row['topic_id'] != null && !topicIds.contains(row['topic_id'])) ||
+          row['model'] is! String ||
+          !embeddingKeys.add((row['message_id'], row['model'])) ||
+          row['embedding'] is! String ||
+          row['created_at_utc'] is! int) {
+        throw const FormatException(
+          'Backup contains an invalid conversation embedding record.',
+        );
+      }
+      final decodedEmbedding = jsonDecode(row['embedding']! as String);
+      if (decodedEmbedding is! List ||
+          decodedEmbedding.isEmpty ||
+          decodedEmbedding.any(
+            (value) => value is! num || !value.toDouble().isFinite,
+          )) {
+        throw const FormatException(
+          'Backup contains an invalid conversation embedding vector.',
+        );
+      }
+    }
+    final topicEmbeddingKeys = <(Object?, Object?)>{};
+    for (final row in rowsByTable['conversation_topic_embedding']!) {
+      if (row['topic_id'] is! String ||
+          !topicIds.contains(row['topic_id']) ||
+          row['model'] is! String ||
+          !topicEmbeddingKeys.add((row['topic_id'], row['model'])) ||
+          row['embedding'] is! String ||
+          row['created_at_utc'] is! int) {
+        throw const FormatException(
+          'Backup contains an invalid conversation topic embedding record.',
+        );
+      }
+      final decodedEmbedding = jsonDecode(row['embedding']! as String);
+      if (decodedEmbedding is! List ||
+          decodedEmbedding.isEmpty ||
+          decodedEmbedding.any(
+            (value) => value is! num || !value.toDouble().isFinite,
+          )) {
+        throw const FormatException(
+          'Backup contains an invalid conversation topic embedding vector.',
+        );
+      }
+    }
+    final memoryIds = <String>{};
+    for (final row in rowsByTable['user_memory']!) {
+      final sourcesJson = row['source_message_ids'];
+      final vectorJson = row['embedding'];
+      final confidence = row['confidence'];
+      if (row['id'] is! String ||
+          !memoryIds.add(row['id']! as String) ||
+          !const {
+            'habit',
+            'preference',
+            'wellbeing',
+            'follow_up',
+          }.contains(row['kind']) ||
+          row['memory_key'] is! String ||
+          row['content'] is! String ||
+          confidence is! num ||
+          !confidence.toDouble().isFinite ||
+          confidence < 0 ||
+          confidence > 1 ||
+          sourcesJson is! String ||
+          row['created_at_utc'] is! int ||
+          row['updated_at_utc'] is! int ||
+          (row['expires_at_utc'] != null && row['expires_at_utc'] is! int) ||
+          row['embedding_model'] is! String ||
+          vectorJson is! String) {
+        throw const FormatException('Backup contains invalid user memory.');
+      }
+      final sources = jsonDecode(sourcesJson);
+      final vector = jsonDecode(vectorJson);
+      if (sources is! List ||
+          sources.isEmpty ||
+          sources.any(
+            (sourceId) =>
+                sourceId is! String ||
+                !messageIds.contains(sourceId) ||
+                messageRows[sourceId]?['role'] != 'user',
+          ) ||
+          vector is! List ||
+          vector.isEmpty ||
+          vector.any((value) => value is! num || !value.toDouble().isFinite)) {
+        throw const FormatException('Backup contains invalid user memory.');
+      }
+    }
+    final memoryJobIds = <String>{};
+    for (final row in rowsByTable['background_memory_job']!) {
+      final id = row['id'];
+      final userId = row['user_message_id'];
+      final modelId = row['model_message_id'];
+      final user = messageRows[userId];
+      final model = modelId == null ? null : messageRows[modelId];
+      if (id is! String ||
+          !memoryJobIds.add(id) ||
+          userId is! String ||
+          user?['role'] != 'user' ||
+          (modelId != null &&
+              (modelId is! String ||
+                  model?['role'] != 'model' ||
+                  model?['parent_message_id'] != userId)) ||
+          row['queued_at_utc'] is! int ||
+          ![0, 1].contains(row['fork_topic_on_update'])) {
+        throw const FormatException(
+          'Backup contains an invalid background memory job.',
+        );
       }
     }
     for (final row in rowsByTable['active_child']!) {
@@ -2190,24 +2166,45 @@ class SqliteMessageStore implements MessageStore {
         );
       }
     }
-    for (final row in rowsByTable['sara_private_thought']!) {
-      final thought = SaraPrivateThought.fromMap(row);
-      if (!thought.sourceMessageIds.every(messageIds.contains)) {
+    final messageRowsById = {for (final row in messages) row['id']: row};
+    for (final feedback in tables['assistant_feedback'] as List? ?? const []) {
+      if (feedback is! Map ||
+          feedback['response_message_id'] is! String ||
+          (feedback['rating'] != null &&
+              ![-1, 1].contains(feedback['rating'])) ||
+          (feedback['reaction'] != null && feedback['reaction'] is! String)) {
         throw const FormatException(
-          'Backup contains a thought with a missing source message.',
+          'Backup contains invalid message feedback.',
         );
       }
-    }
-    for (final row in rowsByTable['sara_autonomy_goal']!) {
-      final goal = SaraAutonomyGoal.fromMap(row);
-      if ((goal.branchMessageId != '' &&
-              !messageIds.contains(goal.branchMessageId)) ||
-          !goal.sourceMessageIds.every(messageIds.contains) ||
-          !const {'active', 'completed'}.contains(goal.status)) {
-        throw const FormatException('Backup contains an invalid Sara goal.');
+      final response = messageRowsById[feedback['response_message_id']];
+      if (response == null) {
+        throw const FormatException(
+          'Backup feedback references a missing response message.',
+        );
       }
+      response['rating'] = feedback['rating'];
+      response['reaction'] = feedback['reaction'];
     }
-    for (final row in rowsByTable['terminal_command_history']!) {
+    final legacyHistory =
+        tables['terminal_command_history'] as List? ?? const [];
+    final historyRows = <Map<String, Object?>>[];
+    for (final rawRow in legacyHistory) {
+      if (rawRow is! Map ||
+          rawRow.keys.any((key) => key is! String) ||
+          rawRow.values.any(
+            (value) =>
+                value != null &&
+                value is! String &&
+                value is! int &&
+                value is! double &&
+                value is! bool,
+          )) {
+        throw const FormatException(
+          'Backup contains an invalid terminal command history record.',
+        );
+      }
+      final row = Map<String, Object?>.from(rawRow);
       if (row['command'] is! String ||
           row['working_directory'] is! String ||
           row['task_context'] is! String ||
@@ -2226,30 +2223,78 @@ class SqliteMessageStore implements MessageStore {
           'Backup contains an invalid terminal command history record.',
         );
       }
+      historyRows.add(row);
     }
-    final historyIds = rowsByTable['terminal_command_history']!
-        .map((row) => row['id'])
-        .whereType<int>()
-        .toSet();
-    for (final row in rowsByTable['terminal_command_activity_link']!) {
-      if (row['terminal_history_id'] is! int ||
-          !historyIds.contains(row['terminal_history_id']) ||
-          row['response_message_id'] is! String) {
+    final historyRowsById = {
+      for (final row in historyRows)
+        if (row['id'] is int) row['id'] as int: row,
+    };
+    final historyResponseIds = <int, List<String>>{};
+    for (final rawLink
+        in tables['terminal_command_activity_link'] as List? ?? const []) {
+      if (rawLink is! Map ||
+          rawLink['terminal_history_id'] is! int ||
+          rawLink['response_message_id'] is! String) {
         throw const FormatException(
           'Backup contains an invalid terminal command activity link.',
         );
       }
+      final historyId = rawLink['terminal_history_id']! as int;
+      final responseId = rawLink['response_message_id']! as String;
+      if (!historyRowsById.containsKey(historyId) ||
+          !messageIds.contains(responseId)) {
+        throw const FormatException(
+          'Backup contains an invalid terminal command activity link.',
+        );
+      }
+      historyResponseIds.putIfAbsent(historyId, () => []).add(responseId);
     }
-    final conversationStates = rowsByTable['conversation_state']!;
-    if (conversationStates.length != 1 ||
-        conversationStates.single['id'] != 1 ||
-        (conversationStates.single['active_leaf_message_id'] != null &&
-            !messageIds.contains(
-              conversationStates.single['active_leaf_message_id'],
-            ))) {
-      throw const FormatException(
-        'Backup contains an invalid active conversation state.',
-      );
+    final expandedHistoryRows = <Map<String, Object?>>[];
+    for (final row in historyRows) {
+      final responseIds = <String>[];
+      final directResponseId = row['response_message_id'];
+      if (directResponseId != null) {
+        if (directResponseId is! String ||
+            !messageIds.contains(directResponseId)) {
+          throw const FormatException(
+            'Backup terminal history references a missing response.',
+          );
+        }
+        responseIds.add(directResponseId);
+      }
+      for (final responseId
+          in historyResponseIds[row['id']] ?? const <String>[]) {
+        if (!responseIds.contains(responseId)) responseIds.add(responseId);
+      }
+      if (responseIds.isEmpty) {
+        continue;
+      }
+      for (var index = 0; index < responseIds.length; index++) {
+        final expandedRow = Map<String, Object?>.from(row)
+          ..['response_message_id'] = responseIds[index];
+        expandedHistoryRows.add(expandedRow);
+      }
+    }
+    for (final row in messages) {
+      final existingJson = row['terminal_command_data'] as String;
+      final existing = jsonDecode(existingJson);
+      if (existing is! List ||
+          existing.any(
+            (activity) =>
+                activity is! Map || activity.keys.any((key) => key is! String),
+          )) {
+        throw const FormatException(
+          'Backup contains invalid message terminal command data.',
+        );
+      }
+    }
+    for (final history in expandedHistoryRows) {
+      final responseId = history['response_message_id']! as String;
+      final response = messageRowsById[responseId]!;
+      final activities =
+          jsonDecode(response['terminal_command_data']! as String) as List;
+      activities.add(TerminalCommandHistoryEntry.fromMap(history).toMap());
+      response['terminal_command_data'] = jsonEncode(activities);
     }
     for (final row in rowsByTable['message_attachment']!) {
       if (!messageIds.contains(row['message_id'])) {
@@ -2275,7 +2320,6 @@ class SqliteMessageStore implements MessageStore {
           await transaction.insert(table, row);
         }
       }
-      await _deduplicateTerminalCommandHistory(transaction);
     });
   }
 
