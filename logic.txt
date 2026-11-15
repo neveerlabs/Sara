@@ -372,6 +372,13 @@ bukan ditulis seolah-olah sudah diperbaiki.
   rujukan Markdown; daftar aplikasi menjadi jaminan sumber tetap terlihat.
 - Tautan Markdown pada balasan dapat dibuka dengan aplikasi browser desktop.
 
+13. Notifications
+- Data notifikasi disimpan di cache aplikasi
+- Icon tombol centang dua untuk menandai notif sudah dibaca
+- Icon tombol tempat sampah untuk menghapus notif
+- Pesan error yg muncul, bukan hanya ditampilkan di toasts saja,
+  melainkan disimpan di cache aplikasi dan muncul di jendela notifikasi.
+
 File implementasi utama
 - `lib/main.dart`: UI, mode, edit/regenerate/hapus, lampiran, kamera, TTS.
 - `lib/gemini_reply_service.dart`: konteks prompt, streaming Gemini, tool calls.

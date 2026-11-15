@@ -54,6 +54,25 @@ String appText(String english, {Map<String, Object?> values = const {}}) {
 
 const _indonesian = <String, String>{
   'Settings': 'Pengaturan',
+  'Notifications': 'Notifikasi',
+  'Mark all as read': 'Tandai semua sudah dibaca',
+  'Delete all notifications': 'Hapus semua notifikasi',
+  'No notifications': 'Tidak ada notifikasi',
+  'Back to notifications': 'Kembali ke notifikasi',
+  'Mark as read': 'Tandai sudah dibaca',
+  'Delete notification': 'Hapus notifikasi',
+  'Error': 'Error',
+  'Error copied': 'Detail error disalin',
+  'Could not copy error details: {error}':
+      'Tidak dapat menyalin detail error: {error}',
+  'Loading latest commit...': 'Memuat commit terbaru...',
+  'Could not load latest commit': 'Tidak dapat memuat commit terbaru',
+  'Could not load latest commit: {error}':
+      'Tidak dapat memuat commit terbaru: {error}',
+  'Could not show GitHub commit preview':
+      'Tidak dapat menampilkan pratinjau commit GitHub',
+  'Try again': 'Coba lagi',
+  'Open on GitHub': 'Buka di GitHub',
   'Close settings': 'Tutup pengaturan',
   'PREFERENCES': 'PREFERENSI',
   'Personal': 'Personal',

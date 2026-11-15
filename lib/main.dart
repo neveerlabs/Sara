@@ -14,6 +14,7 @@ import 'package:flutter/gestures.dart' show PointerScrollEvent;
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_highlight/themes/atom-one-dark.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -39,6 +40,7 @@ import 'chat_attachment.dart';
 import 'chat_message.dart';
 import 'gemini_reply_service.dart';
 import 'desktop_notification_service.dart';
+import 'github_commit_service.dart';
 import 'link_preview_service.dart';
 import 'message_database.dart';
 import 'sara_backup.dart';
@@ -140,11 +142,47 @@ const _border = Color(0xFF424449);
 const _muted = Color(0xFF9AA3B2);
 const _text = Color(0xFFE6EAF2);
 const _accent = Color(0xFF79A0FF);
+const _githubInsertions = Color(0xFF81B88B);
+const _githubDeletions = Color(0xFFC74E39);
+const _githubChanges = Color(0xFFD7BA7D);
 const _providerStorageKey = 'ai_provider';
 const _modelStorageKey = 'ai_model';
 const _defaultModel = 'gemini-3.5-flash-lite';
 const _emojiFontFamily = 'Noto Color Emoji';
 const _uuid = Uuid();
+
+class _AppErrorNotification {
+  const _AppErrorNotification({
+    required this.id,
+    required this.title,
+    required this.message,
+    required this.receivedAt,
+    this.isRead = false,
+  });
+
+  final String id;
+  final String title;
+  final String message;
+  final DateTime receivedAt;
+  final bool isRead;
+
+  _AppErrorNotification copyWith({bool? isRead}) => _AppErrorNotification(
+    id: id,
+    title: title,
+    message: message,
+    receivedAt: receivedAt,
+    isRead: isRead ?? this.isRead,
+  );
+}
+
+String _errorNotificationTitle(String message) {
+  final separator = message.indexOf(':');
+  if (separator > 0 && separator <= 48) {
+    final title = message.substring(0, separator).trim();
+    if (title.isNotEmpty && !title.contains('\n')) return title;
+  }
+  return appText('Error');
+}
 
 String? _singleEmoji(String text) {
   final graphemes = text.trim().characters;
@@ -277,6 +315,7 @@ KeyEventResult _handleEnterSubmission(
 OverlayEntry? _activeToast;
 Timer? _activeToastTimer;
 Future<void> Function(String message)? _notifyUnseenError;
+void Function(String message)? _recordToastErrorNotification;
 
 Future<bool> _copyToastMessage(String message) async {
   try {
@@ -294,6 +333,7 @@ void _showToast(
   bool isError = false,
   bool notifyDesktop = true,
 }) {
+  if (isError) _recordToastErrorNotification?.call(message);
   final notifyError = _notifyUnseenError;
   if (isError && notifyDesktop && notifyError != null) {
     unawaited(notifyError(message));
@@ -464,6 +504,7 @@ class SaraApp extends StatefulWidget {
     this.notificationService,
     this.notificationSoundPlayer,
     this.linkPreviewService,
+    this.githubCommitService,
     this.openExternalLink,
   });
 
@@ -479,6 +520,7 @@ class SaraApp extends StatefulWidget {
   final DesktopNotificationService? notificationService;
   final Future<void> Function(String assetPath)? notificationSoundPlayer;
   final LinkPreviewService? linkPreviewService;
+  final GitHubCommitService? githubCommitService;
   final Future<void> Function(Uri uri)? openExternalLink;
 
   @override
@@ -564,6 +606,7 @@ class _SaraAppState extends State<SaraApp> {
           notificationService: widget.notificationService,
           notificationSoundPlayer: widget.notificationSoundPlayer,
           linkPreviewService: widget.linkPreviewService,
+          githubCommitService: widget.githubCommitService,
           openExternalLink: widget.openExternalLink,
         ),
       ),
@@ -586,6 +629,7 @@ class ChatPage extends StatefulWidget {
     this.notificationService,
     this.notificationSoundPlayer,
     this.linkPreviewService,
+    this.githubCommitService,
     this.openExternalLink,
   });
 
@@ -601,6 +645,7 @@ class ChatPage extends StatefulWidget {
   final DesktopNotificationService? notificationService;
   final Future<void> Function(String assetPath)? notificationSoundPlayer;
   final LinkPreviewService? linkPreviewService;
+  final GitHubCommitService? githubCommitService;
   final Future<void> Function(Uri uri)? openExternalLink;
 
   @override
@@ -619,6 +664,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   final Map<String, List<ChatAttachment>> _attachmentsByMessage = {};
   final Map<String, int> _assistantFeedback = {};
   final Map<String, String> _assistantReactions = {};
+  final List<_AppErrorNotification> _errorNotifications = [];
   final Map<String, List<TerminalCommandHistoryEntry>>
   _terminalActivitiesByResponse = {};
   Map<String, MessageBranchNavigation> _messageBranches = {};
@@ -647,6 +693,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   bool _proactiveModeAllows = false;
   Completer<void>? _proactiveAppendCompletion;
   bool _isDraggingFiles = false;
+  bool _isErrorNotificationPanelOpen = false;
+  String? _selectedErrorNotificationId;
   bool _hasStreamedReply = false;
   bool _showScrollToBottom = false;
   bool _followLatestDuringStreaming = true;
@@ -658,6 +706,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   late final SpeechPlaybackController _speechPlaybackController;
   late final LinkPreviewService _linkPreviewService =
       widget.linkPreviewService ?? LinkPreviewService();
+  late final void Function(String message) _errorNotificationRecorder =
+      _recordErrorNotification;
 
   @override
   void initState() {
@@ -668,6 +718,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     _unseenErrorHandler = (message) =>
         _notifyWhenUnavailable(message, title: appText('Sara desktop app'));
     _notifyUnseenError = _unseenErrorHandler;
+    _recordToastErrorNotification = _errorNotificationRecorder;
     _scrollController.addListener(_handleScroll);
     _initialize();
   }
@@ -677,6 +728,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     if (identical(_notifyUnseenError, _unseenErrorHandler)) {
       _notifyUnseenError = null;
+    }
+    if (identical(_recordToastErrorNotification, _errorNotificationRecorder)) {
+      _recordToastErrorNotification = null;
     }
     _activeToastTimer?.cancel();
     _activeToastTimer = null;
@@ -2492,6 +2546,118 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     _followLatestDuringStreaming = _scrollController.position.extentAfter <= 80;
   }
 
+  int get _unreadErrorNotificationCount =>
+      _errorNotifications.where((notification) => !notification.isRead).length;
+
+  void _recordErrorNotification(String message) {
+    if (!mounted) return;
+    final trimmedMessage = message.trim();
+    if (trimmedMessage.isEmpty) return;
+    setState(() {
+      _errorNotifications.insert(
+        0,
+        _AppErrorNotification(
+          id: _uuid.v4(),
+          title: _errorNotificationTitle(trimmedMessage),
+          message: trimmedMessage,
+          receivedAt: DateTime.now(),
+        ),
+      );
+    });
+  }
+
+  void _toggleErrorNotificationPanel() {
+    setState(() {
+      _isErrorNotificationPanelOpen = !_isErrorNotificationPanelOpen;
+      if (!_isErrorNotificationPanelOpen) {
+        _selectedErrorNotificationId = null;
+      }
+    });
+  }
+
+  void _closeErrorNotificationPanel() {
+    if (!_isErrorNotificationPanelOpen) return;
+    setState(() {
+      _isErrorNotificationPanelOpen = false;
+      _selectedErrorNotificationId = null;
+    });
+  }
+
+  void _showErrorNotification(String id) {
+    final index = _errorNotifications.indexWhere(
+      (notification) => notification.id == id,
+    );
+    if (index < 0) return;
+    setState(() {
+      _selectedErrorNotificationId = id;
+      _errorNotifications[index] = _errorNotifications[index].copyWith(
+        isRead: true,
+      );
+    });
+  }
+
+  void _markAllErrorNotificationsRead() {
+    setState(() {
+      for (var index = 0; index < _errorNotifications.length; index++) {
+        _errorNotifications[index] = _errorNotifications[index].copyWith(
+          isRead: true,
+        );
+      }
+    });
+  }
+
+  void _markSelectedErrorNotificationRead() {
+    final id = _selectedErrorNotificationId;
+    if (id == null) return;
+    final index = _errorNotifications.indexWhere(
+      (notification) => notification.id == id,
+    );
+    if (index < 0) return;
+    setState(() {
+      _errorNotifications[index] = _errorNotifications[index].copyWith(
+        isRead: true,
+      );
+    });
+  }
+
+  void _deleteAllErrorNotifications() {
+    setState(() {
+      _errorNotifications.clear();
+      _selectedErrorNotificationId = null;
+      _isErrorNotificationPanelOpen = false;
+    });
+  }
+
+  void _deleteSelectedErrorNotification() {
+    final id = _selectedErrorNotificationId;
+    if (id == null) return;
+    setState(() {
+      _errorNotifications.removeWhere((notification) => notification.id == id);
+      _selectedErrorNotificationId = null;
+    });
+  }
+
+  Future<void> _copyErrorNotification(String id) async {
+    final index = _errorNotifications.indexWhere(
+      (candidate) => candidate.id == id,
+    );
+    if (index < 0) return;
+    final notification = _errorNotifications[index];
+    try {
+      await Clipboard.setData(ClipboardData(text: notification.message));
+      if (mounted) _showMessage(appText('Error copied'), isError: false);
+    } catch (error) {
+      if (mounted) {
+        _showMessage(
+          appText(
+            'Could not copy error details: {error}',
+            values: {'error': error},
+          ),
+        );
+      }
+    }
+  }
+
   Future<void> _notifyWhenUnavailable(
     String message, {
     required String title,
@@ -2833,6 +2999,14 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     final selectedSearchDate = selectedSearchMessage == null
         ? ''
         : _searchResultDate(selectedSearchMessage.createdAtUtc);
+    final selectedErrorNotificationIndex = _selectedErrorNotificationId == null
+        ? -1
+        : _errorNotifications.indexWhere(
+            (notification) => notification.id == _selectedErrorNotificationId,
+          );
+    final selectedErrorNotification = selectedErrorNotificationIndex < 0
+        ? null
+        : _errorNotifications[selectedErrorNotificationIndex];
     final showInlineSettings =
         MediaQuery.sizeOf(context).width < 680 && !showSearchResultsPanel;
     return Scaffold(
@@ -2840,7 +3014,14 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       body: SafeArea(
         child: Column(
           children: [
-            if (Platform.isLinux) const _LinuxWindowTitleBar(),
+            if (Platform.isLinux)
+              _LinuxWindowTitleBar(
+                unreadNotificationCount: _unreadErrorNotificationCount,
+                onNotificationsPressed: _toggleErrorNotificationPanel,
+                githubCommitService: widget.githubCommitService,
+                onOpenLink: _openSearchResultLink,
+                onError: (message) => _showMessage(message),
+              ),
             Expanded(
               child: DropTarget(
                 key: const ValueKey('room-file-drop-target'),
@@ -3033,6 +3214,43 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                         },
                       ),
                     ),
+                    if (_isErrorNotificationPanelOpen) ...[
+                      Positioned.fill(
+                        child: Listener(
+                          key: const ValueKey('notification-panel-dismiss'),
+                          onPointerSignal: (event) {
+                            if (event is PointerScrollEvent) {
+                              _closeErrorNotificationPanel();
+                            }
+                          },
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: _closeErrorNotificationPanel,
+                            onVerticalDragStart: (_) =>
+                                _closeErrorNotificationPanel(),
+                            child: const SizedBox.expand(),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        top: 8,
+                        right: 12,
+                        child: _ErrorNotificationPanel(
+                          notifications: _errorNotifications,
+                          selectedNotification: selectedErrorNotification,
+                          onSelect: _showErrorNotification,
+                          onBack: () => setState(
+                            () => _selectedErrorNotificationId = null,
+                          ),
+                          onMarkAllRead: _markAllErrorNotificationsRead,
+                          onDeleteAll: _deleteAllErrorNotifications,
+                          onMarkSelectedRead:
+                              _markSelectedErrorNotificationRead,
+                          onDeleteSelected: _deleteSelectedErrorNotification,
+                          onCopy: _copyErrorNotification,
+                        ),
+                      ),
+                    ],
                     if (!showInlineSettings)
                       Positioned(
                         right: 18,
@@ -3163,8 +3381,710 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   }
 }
 
+class _ErrorNotificationPanel extends StatelessWidget {
+  const _ErrorNotificationPanel({
+    required this.notifications,
+    required this.selectedNotification,
+    required this.onSelect,
+    required this.onBack,
+    required this.onMarkAllRead,
+    required this.onDeleteAll,
+    required this.onMarkSelectedRead,
+    required this.onDeleteSelected,
+    required this.onCopy,
+  });
+
+  final List<_AppErrorNotification> notifications;
+  final _AppErrorNotification? selectedNotification;
+  final ValueChanged<String> onSelect;
+  final VoidCallback onBack;
+  final VoidCallback onMarkAllRead;
+  final VoidCallback onDeleteAll;
+  final VoidCallback onMarkSelectedRead;
+  final VoidCallback onDeleteSelected;
+  final ValueChanged<String> onCopy;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth < 360 ? constraints.maxWidth : 360.0;
+        return Material(
+          key: const ValueKey('error-notification-panel'),
+          color: const Color(0xFF202226),
+          elevation: 12,
+          clipBehavior: Clip.antiAlias,
+          shape: RoundedRectangleBorder(
+            side: const BorderSide(color: Color(0xFF41444A)),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: SizedBox(
+            width: width,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 370),
+              child: selectedNotification == null
+                  ? _buildList()
+                  : _buildDetail(selectedNotification!),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildList() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _header(
+          title: appText('Notifications'),
+          actions: [
+            _panelAction(
+              tooltip: appText('Mark all as read'),
+              icon: Icons.done_all,
+              onPressed: onMarkAllRead,
+            ),
+            _panelAction(
+              tooltip: appText('Delete all notifications'),
+              icon: Icons.delete_outline,
+              onPressed: onDeleteAll,
+            ),
+          ],
+        ),
+        if (notifications.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 22),
+            child: Text(
+              appText('No notifications'),
+              style: const TextStyle(color: _muted, fontSize: 12),
+            ),
+          )
+        else
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 318),
+            child: ListView.separated(
+              shrinkWrap: true,
+              padding: EdgeInsets.zero,
+              itemCount: notifications.length,
+              separatorBuilder: (context, index) => const Divider(
+                height: 1,
+                thickness: 1,
+                color: Color(0xFF35383E),
+              ),
+              itemBuilder: (context, index) {
+                final notification = notifications[index];
+                return _notificationRow(notification);
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _notificationRow(_AppErrorNotification notification) {
+    final date = notification.receivedAt;
+    final dateLabel =
+        '${date.month.toString().padLeft(2, '0')}/'
+        '${date.day.toString().padLeft(2, '0')}/'
+        '${date.year.toString().padLeft(4, '0')}';
+    return InkWell(
+      key: ValueKey('error-notification-row-${notification.id}'),
+      onTap: () => onSelect(notification.id),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    notification.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: _text,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  dateLabel,
+                  style: const TextStyle(
+                    color: Color(0xFF828791),
+                    fontSize: 10,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 3),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    notification.message,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: _muted, fontSize: 11),
+                  ),
+                ),
+                if (!notification.isRead) ...[
+                  const SizedBox(width: 10),
+                  const DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Color(0xFF579BFF),
+                      shape: BoxShape.circle,
+                    ),
+                    child: SizedBox(width: 7, height: 7),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetail(_AppErrorNotification notification) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _header(
+          title: notification.title,
+          leading: _panelAction(
+            tooltip: appText('Back to notifications'),
+            icon: Icons.arrow_back,
+            onPressed: onBack,
+          ),
+          actions: [
+            _panelAction(
+              tooltip: appText('Mark as read'),
+              icon: Icons.done_all,
+              onPressed: onMarkSelectedRead,
+            ),
+            _panelAction(
+              tooltip: appText('Delete notification'),
+              icon: Icons.delete_outline,
+              onPressed: onDeleteSelected,
+            ),
+          ],
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 8, 6),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 180),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      notification.message,
+                      style: const TextStyle(
+                        color: Color(0xFFD8DBE1),
+                        fontSize: 12,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              _panelAction(
+                tooltip: appText('Copy error details'),
+                icon: Icons.content_copy,
+                onPressed: () => onCopy(notification.id),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _header({
+    required String title,
+    Widget? leading,
+    required List<Widget> actions,
+  }) {
+    return SizedBox(
+      height: 44,
+      child: Row(
+        children: [
+          if (leading != null) leading,
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(left: leading == null ? 14 : 4),
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: _text,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+          ...actions,
+          const SizedBox(width: 5),
+        ],
+      ),
+    );
+  }
+
+  Widget _panelAction({
+    required String tooltip,
+    required IconData icon,
+    required VoidCallback onPressed,
+  }) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      icon: Icon(icon),
+      color: _muted,
+      iconSize: 17,
+      visualDensity: VisualDensity.compact,
+      constraints: const BoxConstraints.tightFor(width: 32, height: 32),
+      padding: EdgeInsets.zero,
+    );
+  }
+}
+
+class _GitHubCommitButton extends StatefulWidget {
+  const _GitHubCommitButton({
+    required this.onOpenUrl,
+    required this.onError,
+    this.service,
+  });
+
+  final Future<void> Function(String url) onOpenUrl;
+  final ValueChanged<String> onError;
+  final GitHubCommitService? service;
+
+  @override
+  State<_GitHubCommitButton> createState() => _GitHubCommitButtonState();
+}
+
+class _GitHubCommitButtonState extends State<_GitHubCommitButton> {
+  final LayerLink _buttonLink = LayerLink();
+  OverlayEntry? _previewEntry;
+  Timer? _closeTimer;
+  Future<GitHubCommit>? _commitFuture;
+  late final GitHubCommitService _service =
+      widget.service ?? GitHubCommitService();
+
+  void _showPreview() {
+    _closeTimer?.cancel();
+    _commitFuture ??= _service.fetchLatestCommit();
+    if (_previewEntry != null) return;
+    final overlay = Overlay.maybeOf(context, rootOverlay: true);
+    if (overlay == null) {
+      widget.onError(appText('Could not show GitHub commit preview'));
+      return;
+    }
+    final entry = OverlayEntry(builder: _buildPreviewOverlay);
+    _previewEntry = entry;
+    overlay.insert(entry);
+  }
+
+  Widget _buildPreviewOverlay(BuildContext context) {
+    final width = math.max(
+      0.0,
+      math.min(460.0, MediaQuery.sizeOf(context).width - 24),
+    );
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        CompositedTransformFollower(
+          link: _buttonLink,
+          showWhenUnlinked: false,
+          targetAnchor: Alignment.bottomRight,
+          followerAnchor: Alignment.topRight,
+          offset: const Offset(0, 7),
+          child: MouseRegion(
+            onEnter: (_) => _closeTimer?.cancel(),
+            onExit: (_) => _scheduleClose(),
+            child: SizedBox(
+              width: width,
+              child: FutureBuilder<GitHubCommit>(
+                future: _commitFuture,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return _GitHubCommitCardFrame(
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          const SizedBox(width: 9),
+                          Text(
+                            appText('Loading latest commit...'),
+                            style: const TextStyle(color: _muted, fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                  if (snapshot.hasError || !snapshot.hasData) {
+                    return _GitHubCommitCardFrame(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            appText('Could not load latest commit'),
+                            style: const TextStyle(
+                              color: _text,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            '${snapshot.error ?? appText('Unknown error.')}',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: _muted, fontSize: 11),
+                          ),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton(
+                              key: const ValueKey('github-commit-retry'),
+                              onPressed: _retryLoad,
+                              child: Text(appText('Try again')),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                  final commit = snapshot.data!;
+                  return _GitHubCommitPreviewCard(
+                    commit: commit,
+                    onOpen: () => unawaited(_openCommit(commit)),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _openLatestCommit() async {
+    try {
+      final commit = await (_commitFuture ??= _service.fetchLatestCommit());
+      await _openCommit(commit);
+    } catch (error) {
+      if (mounted) {
+        widget.onError(
+          appText(
+            'Could not load latest commit: {error}',
+            values: {'error': error},
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _openCommit(GitHubCommit commit) async {
+    await widget.onOpenUrl(commit.url);
+    _removePreview();
+  }
+
+  void _retryLoad() {
+    _commitFuture = _service.fetchLatestCommit();
+    _previewEntry?.markNeedsBuild();
+  }
+
+  void _scheduleClose() {
+    _closeTimer?.cancel();
+    _closeTimer = Timer(const Duration(milliseconds: 220), _removePreview);
+  }
+
+  void _removePreview() {
+    _closeTimer?.cancel();
+    _closeTimer = null;
+    final entry = _previewEntry;
+    _previewEntry = null;
+    if (entry?.mounted ?? false) entry!.remove();
+  }
+
+  @override
+  void dispose() {
+    _closeTimer?.cancel();
+    _removePreview();
+    if (widget.service == null) _service.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => _showPreview(),
+      onExit: (_) => _scheduleClose(),
+      child: CompositedTransformTarget(
+        link: _buttonLink,
+        child: SizedBox(
+          width: 38,
+          height: 36,
+          child: IconButton(
+            key: const ValueKey('github-commit-button'),
+            onPressed: () => unawaited(_openLatestCommit()),
+            color: const Color(0xFFB6BAC2),
+            iconSize: 18,
+            padding: EdgeInsets.zero,
+            icon: const FaIcon(FontAwesomeIcons.github, size: 18),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GitHubCommitPreviewCard extends StatelessWidget {
+  const _GitHubCommitPreviewCard({required this.commit, required this.onOpen});
+
+  final GitHubCommit commit;
+  final VoidCallback onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final avatar = commit.avatarUrl;
+    return _GitHubCommitCardFrame(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              ClipOval(
+                key: const ValueKey('github-commit-avatar'),
+                child: avatar == null
+                    ? _avatarFallback()
+                    : Image.network(
+                        avatar,
+                        width: 32,
+                        height: 32,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) =>
+                            _avatarFallback(),
+                      ),
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            commit.username,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Color(0xFFDCE3EF),
+                              fontSize: 12,
+                              height: 1,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        const Text(
+                          ',',
+                          style: TextStyle(color: _muted, fontSize: 12),
+                        ),
+                        const SizedBox(width: 6),
+                        const Icon(
+                          LucideIcons300.clock,
+                          size: 13,
+                          color: _muted,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          formatCommitTimeAgo(commit.committedAt),
+                          style: const TextStyle(
+                            color: _muted,
+                            fontSize: 11,
+                            height: 1,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      formatCommitDateTime(commit.committedAt),
+                      key: const ValueKey('github-commit-date'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _muted,
+                        fontSize: 11,
+                        height: 1,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            commit.message.split('\n').first,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Color(0xFFD6D9E0),
+              fontSize: 12,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 6),
+          const Divider(height: 1, color: Color(0xFF3B3E44)),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            child: Text.rich(
+              key: const ValueKey('github-commit-stats'),
+              TextSpan(
+                style: const TextStyle(color: _muted, fontSize: 11),
+                children: [
+                  TextSpan(
+                    text:
+                        '${formatCommitCount(commit.filesChanged)} files changed, ',
+                  ),
+                  TextSpan(
+                    text: '${formatCommitCount(commit.additions)} insertions',
+                    style: const TextStyle(color: _githubInsertions),
+                  ),
+                  const TextSpan(text: ', '),
+                  TextSpan(
+                    text: '${formatCommitCount(commit.deletions)} deletions',
+                    style: const TextStyle(color: _githubDeletions),
+                  ),
+                  const TextSpan(text: ', '),
+                  TextSpan(
+                    text: '${formatCommitCount(commit.changes)} changes',
+                    style: const TextStyle(color: _githubChanges),
+                  ),
+                ],
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const Divider(height: 1, color: Color(0xFF3B3E44)),
+          const SizedBox(height: 4),
+          InkWell(
+            key: const ValueKey('github-commit-open-link'),
+            onTap: onOpen,
+            borderRadius: BorderRadius.circular(4),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  const Icon(
+                    LucideIcons300.gitCommitHorizontal,
+                    size: 14,
+                    color: _accent,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    commit.shortSha,
+                    style: const TextStyle(color: _accent, fontSize: 11),
+                  ),
+                  const Spacer(),
+                  const FaIcon(
+                    FontAwesomeIcons.github,
+                    key: ValueKey('github-commit-open-icon'),
+                    size: 13,
+                    color: _accent,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    appText('Open on GitHub'),
+                    style: const TextStyle(
+                      color: _accent,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _avatarFallback() {
+    return Container(
+      width: 32,
+      height: 32,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(
+        color: Color(0xFF384258),
+        shape: BoxShape.circle,
+      ),
+      child: Text(
+        commit.username.isEmpty ? '?' : commit.username[0].toUpperCase(),
+        style: const TextStyle(
+          color: Color(0xFFDCE3EF),
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
+
+class _GitHubCommitCardFrame extends StatelessWidget {
+  const _GitHubCommitCardFrame({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      key: const ValueKey('github-commit-preview'),
+      color: const Color(0xFF1E2127),
+      elevation: 10,
+      shape: RoundedRectangleBorder(
+        side: const BorderSide(color: Color(0xFF464A52)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(padding: const EdgeInsets.all(9), child: child),
+    );
+  }
+}
+
 class _LinuxWindowTitleBar extends StatefulWidget {
-  const _LinuxWindowTitleBar();
+  const _LinuxWindowTitleBar({
+    required this.unreadNotificationCount,
+    required this.onNotificationsPressed,
+    required this.onOpenLink,
+    required this.onError,
+    this.githubCommitService,
+  });
+
+  final int unreadNotificationCount;
+  final VoidCallback onNotificationsPressed;
+  final Future<void> Function(String url) onOpenLink;
+  final ValueChanged<String> onError;
+  final GitHubCommitService? githubCommitService;
 
   @override
   State<_LinuxWindowTitleBar> createState() => _LinuxWindowTitleBarState();
@@ -3254,6 +4174,67 @@ class _LinuxWindowTitleBarState extends State<_LinuxWindowTitleBar> {
                   ),
                 ),
               ),
+            ),
+            _GitHubCommitButton(
+              service: widget.githubCommitService,
+              onOpenUrl: widget.onOpenLink,
+              onError: widget.onError,
+            ),
+            SizedBox(
+              width: 38,
+              height: 36,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  IconButton(
+                    key: const ValueKey('error-notification-bell'),
+                    onPressed: widget.onNotificationsPressed,
+                    color: const Color(0xFFB6BAC2),
+                    iconSize: 18,
+                    padding: EdgeInsets.zero,
+                    icon: const Icon(Icons.notifications_none),
+                  ),
+                  if (widget.unreadNotificationCount > 0)
+                    Positioned(
+                      top: 2,
+                      right: 6,
+                      child: IgnorePointer(
+                        child: Container(
+                          key: const ValueKey('unread-notification-count'),
+                          constraints: const BoxConstraints(minWidth: 15),
+                          height: 15,
+                          padding: const EdgeInsets.symmetric(horizontal: 3),
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFE24B4B),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: const Color(0xFF24262A),
+                              width: 1,
+                            ),
+                          ),
+                          child: Text(
+                            widget.unreadNotificationCount > 99
+                                ? '99+'
+                                : '${widget.unreadNotificationCount}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 8,
+                              fontWeight: FontWeight.w700,
+                              height: 1,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            Container(
+              width: 1,
+              height: 18,
+              margin: const EdgeInsets.symmetric(horizontal: 2),
+              color: const Color(0xFF55585E),
             ),
             _LinuxWindowControl(
               key: const ValueKey('linux-window-minimize'),
@@ -6718,6 +7699,13 @@ class _MessageRowState extends State<_MessageRow> {
     final emojiOnlyMessage = widget.attachments.isEmpty
         ? _singleEmoji(message.content)
         : null;
+    final isPlainShortUserMessage =
+        message.role == 'user' &&
+        message.content.trim().isNotEmpty &&
+        message.content.runes.length <= 24 &&
+        !message.content.contains('\n') &&
+        messageWebUris.isEmpty &&
+        !RegExp(r'[`*_~#\[\]()>|]').hasMatch(message.content);
     final waitingForTerminalReply =
         message.role == 'model' &&
         message.content.trim().isEmpty &&
@@ -6820,6 +7808,19 @@ class _MessageRowState extends State<_MessageRow> {
                                             'animated-emoji-${message.id}',
                                           ),
                                           emoji: emojiOnlyMessage,
+                                        )
+                                      : isPlainShortUserMessage
+                                      ? SelectableText(
+                                          message.content,
+                                          key: ValueKey(
+                                            'user-message-plain-text-${message.id}',
+                                          ),
+                                          textAlign: TextAlign.left,
+                                          style: const TextStyle(
+                                            color: _text,
+                                            fontSize: 14,
+                                            height: 1.4,
+                                          ),
                                         )
                                       : MarkdownBody(
                                           data: message.content,

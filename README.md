@@ -55,3 +55,5 @@ Riwayat disimpan lokal dan API key disimpan di `keyring` Linux. Pesan untuk bala
 
 
 Licensed under the [PolyForm Noncommercial License 1.0.0](https://github.com/neveerlabs/Sara/blob/main/LICENSE)
+
+GitHub icon by [Font Awesome](https://fontawesome.com), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).

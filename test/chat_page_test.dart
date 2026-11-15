@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:cross_file/cross_file.dart';
@@ -10,6 +11,9 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:lucide_icons_flutter/lucide_icons_300.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sara_desktop/ai_config_store.dart';
@@ -20,6 +24,7 @@ import 'package:sara_desktop/camera_capture.dart';
 import 'package:sara_desktop/camera_capture_cache.dart';
 import 'package:sara_desktop/desktop_notification_service.dart';
 import 'package:sara_desktop/gemini_reply_service.dart';
+import 'package:sara_desktop/github_commit_service.dart';
 import 'package:sara_desktop/link_preview_service.dart';
 import 'package:sara_desktop/main.dart';
 import 'package:sara_desktop/message_database.dart';
@@ -2466,6 +2471,41 @@ void main() {
     );
   });
 
+  testWidgets('short plain user text is centered within its bubble padding', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final messageStore = _MemoryMessageStore()
+      ..messages.add(
+        const ChatMessage(
+          id: 'short-user-text',
+          role: 'user',
+          content: 'p',
+          timestamp: 'Sabtu, 7 November 2026, 00:56',
+          createdAtUtc: 1,
+        ),
+      );
+    await tester.pumpWidget(
+      _testApp(messageStore: messageStore, replyService: _FakeReplyService()),
+    );
+    await tester.pumpAndSettle();
+
+    final bubble = find.byKey(const ValueKey('user-message-bubble'));
+    final text = find.byKey(
+      const ValueKey('user-message-plain-text-short-user-text'),
+    );
+    expect(text, findsOneWidget);
+    final bubbleRect = tester.getRect(bubble);
+    final textRect = tester.getRect(text);
+    expect(textRect.left - bubbleRect.left, closeTo(12, 1));
+    expect(bubbleRect.right - textRect.right, closeTo(12, 1));
+    expect((bubbleRect.center.dy - textRect.center.dy).abs(), lessThan(2));
+  });
+
   testWidgets('user message hover actions copy and delete following history', (
     tester,
   ) async {
@@ -2581,6 +2621,16 @@ void main() {
     expect(find.byKey(const ValueKey('copy-toast-error')), findsNothing);
     final toastText = tester.widget<Text>(find.text('Message copied'));
     expect(toastText.style?.decoration, TextDecoration.none);
+
+    await tester.tap(find.byKey(const ValueKey('error-notification-bell')));
+    await tester.pumpAndSettle();
+    expect(find.text('No notifications'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('unread-notification-count')),
+      findsNothing,
+    );
+    await tester.tap(find.byKey(const ValueKey('error-notification-bell')));
+    await tester.pumpAndSettle();
 
     await mouse.moveTo(const Offset(20, 20));
     await tester.pumpAndSettle();
@@ -4003,6 +4053,111 @@ void main() {
     await tester.pump();
     expect(copiedError, contains('AI request failed'));
     expect(copiedError, contains('test failure'));
+
+    await tester.enterText(find.byType(TextField), 'trigger another error');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('unread-notification-count')),
+      findsOneWidget,
+    );
+    expect(find.text('2'), findsOneWidget);
+    final notificationBell = tester.getRect(
+      find.byKey(const ValueKey('error-notification-bell')),
+    );
+    final unreadBadge = tester.getRect(
+      find.byKey(const ValueKey('unread-notification-count')),
+    );
+    expect(
+      (unreadBadge.center.dx - notificationBell.center.dx).abs(),
+      lessThan(8),
+    );
+    await tester.tap(find.byKey(const ValueKey('error-notification-bell')));
+    await tester.pumpAndSettle();
+    expect(find.text('Notifications'), findsOneWidget);
+    expect(find.text('2'), findsOneWidget);
+    final dateLabels = find.byWidgetPredicate(
+      (widget) =>
+          widget is Text &&
+          RegExp(r'^\d{2}/\d{2}/\d{4}$').hasMatch(widget.data ?? ''),
+    );
+    expect(dateLabels, findsNWidgets(2));
+    expect(
+      (tester.getRect(find.text('AI request failed').first).top -
+              tester.getRect(dateLabels.first).top)
+          .abs(),
+      lessThan(2),
+    );
+    await tester.sendEventToBinding(
+      const PointerScrollEvent(
+        position: Offset(640, 400),
+        scrollDelta: Offset(0, 100),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('error-notification-panel')),
+      findsNothing,
+    );
+    await tester.tap(find.byKey(const ValueKey('error-notification-bell')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('AI request failed').first);
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('error-notification-panel')),
+        matching: find.textContaining(
+          'AI request failed: Bad state: test failure',
+        ),
+      ),
+      findsOneWidget,
+    );
+    final notificationPanel = find.byKey(
+      const ValueKey('error-notification-panel'),
+    );
+    expect(
+      find.descendant(
+        of: notificationPanel,
+        matching: find.byIcon(Icons.done_all),
+      ),
+      findsOneWidget,
+    );
+    expect(tester.getSize(notificationPanel).height, lessThan(125));
+    expect(find.text('1'), findsOneWidget);
+    await tester.tap(
+      find.descendant(
+        of: notificationPanel,
+        matching: find.byTooltip('Copy error details'),
+      ),
+    );
+    await tester.pump();
+    expect(copiedError, contains('AI request failed: Bad state: test failure'));
+    await tester.tap(
+      find.descendant(
+        of: notificationPanel,
+        matching: find.byTooltip('Back to notifications'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.descendant(
+        of: notificationPanel,
+        matching: find.byTooltip('Mark all as read'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('unread-notification-count')),
+      findsNothing,
+    );
+    await tester.tap(
+      find.descendant(
+        of: notificationPanel,
+        matching: find.byTooltip('Delete all notifications'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(notificationPanel, findsNothing);
   });
 
   testWidgets('retries saving a completed reply without another AI request', (
@@ -4115,6 +4270,10 @@ void main() {
       findsOneWidget,
     );
     expect(find.byKey(const ValueKey('linux-window-app-icon')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('error-notification-bell')),
+      findsOneWidget,
+    );
     expect(find.text('Sara'), findsOneWidget);
     expect(find.text('Personal AI Chat'), findsOneWidget);
     final titleBar = find.byKey(const ValueKey('linux-window-title-bar'));
@@ -4153,6 +4312,119 @@ void main() {
     await tester.pump();
 
     expect(calls, ['minimize', 'toggleMaximize', 'startDragging', 'close']);
+  });
+
+  testWidgets('GitHub title bar button previews and opens the latest commit', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final requests = <Uri>[];
+    final client = MockClient((request) async {
+      requests.add(request.url);
+      if (request.url.path.endsWith('/commits')) {
+        return http.Response(
+          jsonEncode([
+            {
+              'sha': 'abcdef1234567890',
+              'html_url':
+                  'https://github.com/neveerlabs/Sara/commit/abcdef1234567890',
+              'commit': {
+                'message': 'feat: show latest commit',
+                'author': {
+                  'name': 'neveerlabs',
+                  'date': '2026-11-15T00:41:59Z',
+                },
+              },
+              'author': {'login': 'neveerlabs', 'avatar_url': null},
+            },
+          ]),
+          200,
+        );
+      }
+      return http.Response(
+        jsonEncode({
+          'sha': 'abcdef1234567890',
+          'stats': {'additions': 12, 'deletions': 3, 'total': 15},
+          'files': [{}, {}],
+        }),
+        200,
+      );
+    });
+    addTearDown(client.close);
+    final service = GitHubCommitService(client: client);
+    final openedUrls = <Uri>[];
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: _MemoryMessageStore(),
+        replyService: _FakeReplyService(),
+        githubCommitService: service,
+        openExternalLink: (uri) async => openedUrls.add(uri),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final gitButton = find.byKey(const ValueKey('github-commit-button'));
+    final gitButtonWidget = tester.widget<IconButton>(gitButton);
+    expect(gitButtonWidget.icon, isA<FaIcon>());
+    expect(
+      (gitButtonWidget.icon as FaIcon).icon?.codePoint,
+      FontAwesomeIcons.github.codePoint,
+    );
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: tester.getCenter(gitButton));
+    await mouse.moveTo(tester.getCenter(gitButton));
+    await tester.pumpAndSettle();
+
+    expect(find.text('neveerlabs'), findsOneWidget);
+    expect(find.text('feat: show latest commit'), findsOneWidget);
+    expect(
+      find.text('2 files changed, 12 insertions, 3 deletions, 15 changes'),
+      findsOneWidget,
+    );
+    final statsText =
+        tester
+                .widget<Text>(find.byKey(const ValueKey('github-commit-stats')))
+                .textSpan
+            as TextSpan;
+    final statsSpans = statsText.children!.whereType<TextSpan>().toList();
+    expect(statsSpans[1].style?.color, const Color(0xFF81B88B));
+    expect(statsSpans[3].style?.color, const Color(0xFFC74E39));
+    expect(statsSpans[5].style?.color, const Color(0xFFD7BA7D));
+    final openOnGitHubIcon = tester.widget<FaIcon>(
+      find.byKey(const ValueKey('github-commit-open-icon')),
+    );
+    expect(openOnGitHubIcon.icon?.codePoint, FontAwesomeIcons.github.codePoint);
+    expect(find.byKey(const ValueKey('github-commit-preview')), findsOneWidget);
+    final avatarRect = tester.getRect(
+      find.byKey(const ValueKey('github-commit-avatar')),
+    );
+    final dateRect = tester.getRect(
+      find.byKey(const ValueKey('github-commit-date')),
+    );
+    expect(dateRect.left, greaterThan(avatarRect.right));
+    expect(dateRect.top, greaterThan(avatarRect.top));
+    expect(dateRect.bottom, lessThan(avatarRect.bottom));
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('github-commit-preview')))
+          .height,
+      lessThan(156),
+    );
+    await tester.tap(find.byKey(const ValueKey('github-commit-open-link')));
+    await tester.pumpAndSettle();
+    expect(
+      openedUrls.single.toString(),
+      'https://github.com/neveerlabs/Sara/commit/abcdef1234567890',
+    );
+
+    await tester.tap(gitButton);
+    await tester.pumpAndSettle();
+    expect(openedUrls, hasLength(2));
+    expect(requests, hasLength(2));
   });
 
   testWidgets('emoji picker inserts a searched emoji at the text cursor', (
@@ -4571,6 +4843,7 @@ SaraApp _testApp({
   DesktopNotificationService? notificationService,
   Future<void> Function(String assetPath)? notificationSoundPlayer,
   LinkPreviewService? linkPreviewService,
+  GitHubCommitService? githubCommitService,
   Future<void> Function(Uri uri)? openExternalLink,
 }) {
   return SaraApp(
@@ -4587,6 +4860,7 @@ SaraApp _testApp({
         notificationService ?? const DesktopNotificationService(isLinux: false),
     notificationSoundPlayer: notificationSoundPlayer ?? (_) async {},
     linkPreviewService: linkPreviewService,
+    githubCommitService: githubCommitService,
     openExternalLink: openExternalLink,
   );
 }
