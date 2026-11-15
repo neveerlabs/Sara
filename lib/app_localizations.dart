@@ -184,6 +184,17 @@ const _indonesian = <String, String>{
   'Next response': 'Balasan berikutnya',
   'Send message': 'Kirim pesan',
   'Send': 'Kirim',
+  'Previous question': 'Pertanyaan sebelumnya',
+  'Next question': 'Pertanyaan berikutnya',
+  'Send answers': 'Kirim jawaban',
+  'This clarification is no longer available.':
+      'Klarifikasi ini sudah tidak tersedia.',
+  'Please enter a valid clarification answer.':
+      'Masukkan jawaban klarifikasi yang valid.',
+  'Could not save clarification answer: {error}':
+      'Tidak dapat menyimpan jawaban klarifikasi: {error}',
+  'Type another answer': 'Ketik jawaban lain',
+  'Your answer: {answer}': 'Jawabanmu: {answer}',
   'Where your thoughts find a home...':
       'Ceritakan apa yang sedang kamu pikirkan...',
   'Add attachment': 'Tambahkan lampiran',

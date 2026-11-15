@@ -1318,7 +1318,7 @@ class ConversationRagService {
           },
         ],
         'generationConfig': {
-          'maxOutputTokens': 512,
+          'maxOutputTokens': 2048,
           'responseMimeType': 'application/json',
           'thinkingConfig': {'thinkingLevel': 'minimal'},
           'temperature': 0.2,
@@ -1331,7 +1331,13 @@ class ConversationRagService {
         'Gemini returned no conversation topic summary.',
       );
     }
-    final content = (candidates.first as Map)['content'];
+    final responseCandidate = candidates.first as Map;
+    if (responseCandidate['finishReason'] == 'MAX_TOKENS') {
+      throw const ConversationRagException(
+        'Gemini reached the output token limit for conversation memory.',
+      );
+    }
+    final content = responseCandidate['content'];
     if (content is! Map || content['parts'] is! List) {
       throw const ConversationRagException(
         'Gemini returned an invalid conversation topic summary.',

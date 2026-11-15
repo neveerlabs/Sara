@@ -8,87 +8,153 @@ import 'package:sara_desktop/web_search_service.dart';
 
 void main() {
   group('WebSearchService', () {
-    test('falls back from Tavily to TinyFish and caps results at five', () async {
-      final config = _MemoryAiConfigStore()
-        ..values[WebSearchConfigKeys.tavilyApiKey] = 'tavily-key'
-        ..values[WebSearchConfigKeys.tinyFishApiKey] = 'tinyfish-key';
-      final requests = <http.Request>[];
-      final service = WebSearchService(
-        configStore: config,
-        client: MockClient((request) async {
-          requests.add(request);
-          if (request.url.host == 'api.tavily.com') {
-            expect(request.headers['authorization'], 'Bearer tavily-key');
-            return http.Response('quota exceeded', 429);
-          }
-          expect(request.url.host, 'api.search.tinyfish.ai');
-          expect(request.headers['x-api-key'], 'tinyfish-key');
-          return http.Response(
-            jsonEncode({
-              'results': List.generate(
-                6,
-                (index) => {
-                  'title': 'Result $index',
-                  'url': 'https://example.com/$index',
-                  'snippet': 'Snippet $index',
-                },
-              ),
-            }),
-            200,
-          );
-        }),
-      );
-
-      final results = await service.search('latest search APIs');
-
-      expect(requests, hasLength(2));
-      expect(results, hasLength(5));
-      expect(results.first.title, 'Result 0');
-    });
-
-    test('falls back when a provider returns fewer than three clean results',
-        () async {
-      final config = _MemoryAiConfigStore()
-        ..values[WebSearchConfigKeys.tavilyApiKey] = 'tavily-key'
-        ..values[WebSearchConfigKeys.tinyFishApiKey] = 'tinyfish-key';
-      final service = WebSearchService(
-        configStore: config,
-        client: MockClient((request) async {
-          if (request.url.host == 'api.tavily.com') {
+    test(
+      'falls back from Tavily to TinyFish and returns all unique results',
+      () async {
+        final config = _MemoryAiConfigStore()
+          ..values[WebSearchConfigKeys.tavilyApiKey] = 'tavily-key'
+          ..values[WebSearchConfigKeys.tinyFishApiKey] = 'tinyfish-key';
+        final requests = <http.Request>[];
+        final service = WebSearchService(
+          configStore: config,
+          client: MockClient((request) async {
+            requests.add(request);
+            if (request.url.host == 'api.tavily.com') {
+              expect(request.headers['authorization'], 'Bearer tavily-key');
+              expect(jsonDecode(request.body)['max_results'], 20);
+              return http.Response('quota exceeded', 429);
+            }
+            expect(request.url.host, 'api.search.tinyfish.ai');
+            expect(request.headers['x-api-key'], 'tinyfish-key');
             return http.Response(
               jsonEncode({
-                'results': [
-                  {
-                    'title': 'Only result',
-                    'url': 'https://example.com/1',
-                    'content': 'One result is not enough',
+                'results': List.generate(
+                  7,
+                  (index) => {
+                    'title': 'Result $index',
+                    'url':
+                        'https://example.com/${index == 6 ? 0 : index}${index == 6 ? '#section' : ''}',
+                    'snippet': 'Snippet $index',
                   },
-                ],
+                ),
               }),
               200,
             );
-          }
-          return http.Response(
-            jsonEncode({
-              'results': List.generate(
-                3,
-                (index) => {
-                  'title': 'TinyFish $index',
-                  'url': 'https://tinyfish.example/$index',
-                  'snippet': 'TinyFish snippet $index',
-                },
-              ),
-            }),
-            200,
-          );
-        }),
-      );
+          }),
+        );
 
-      final results = await service.search('topic with few results');
+        final results = await service.search('latest search APIs');
 
-      expect(results, hasLength(3));
-      expect(results.first.title, 'TinyFish 0');
-    });
+        expect(requests, hasLength(2));
+        expect(results, hasLength(6));
+        expect(results.first.title, 'Result 0');
+      },
+    );
+
+    test(
+      'combines unique results while falling back to another provider',
+      () async {
+        final config = _MemoryAiConfigStore()
+          ..values[WebSearchConfigKeys.tavilyApiKey] = 'tavily-key'
+          ..values[WebSearchConfigKeys.tinyFishApiKey] = 'tinyfish-key';
+        final service = WebSearchService(
+          configStore: config,
+          client: MockClient((request) async {
+            if (request.url.host == 'api.tavily.com') {
+              return http.Response(
+                jsonEncode({
+                  'results': [
+                    {
+                      'title': 'Only result',
+                      'url': 'https://example.com/1',
+                      'content': 'One result is not enough',
+                    },
+                  ],
+                }),
+                200,
+              );
+            }
+            return http.Response(
+              jsonEncode({
+                'results': List.generate(
+                  3,
+                  (index) => {
+                    'title': 'TinyFish $index',
+                    'url': index == 0
+                        ? 'https://example.com/1#section'
+                        : 'https://tinyfish.example/$index',
+                    'snippet': 'TinyFish snippet $index',
+                  },
+                ),
+              }),
+              200,
+            );
+          }),
+        );
+
+        final results = await service.search('topic with few results');
+
+        expect(results, hasLength(3));
+        expect(results.map((result) => result.url).toSet(), hasLength(3));
+        expect(results.first.title, 'Only result');
+      },
+    );
+
+    test(
+      'returns available results even when fewer than three are found',
+      () async {
+        final config = _MemoryAiConfigStore()
+          ..values[WebSearchConfigKeys.tavilyApiKey] = 'tavily-key'
+          ..values[WebSearchConfigKeys.tinyFishApiKey] = 'tinyfish-key';
+        final service = WebSearchService(
+          configStore: config,
+          client: MockClient((request) async {
+            if (request.url.host == 'api.tavily.com') {
+              return http.Response(
+                jsonEncode({
+                  'results': [
+                    {
+                      'title': 'Tavily result',
+                      'url': 'https://tavily.example/1',
+                      'content': 'Tavily snippet',
+                    },
+                  ],
+                }),
+                200,
+              );
+            }
+            if (request.url.host == 'api.search.tinyfish.ai') {
+              return http.Response(
+                jsonEncode({
+                  'results': [
+                    {
+                      'title': 'TinyFish result',
+                      'url': 'https://tinyfish.example/1',
+                      'snippet': 'TinyFish snippet',
+                    },
+                  ],
+                }),
+                200,
+              );
+            }
+            return http.Response(
+              jsonEncode({
+                'data': {'web': []},
+              }),
+              200,
+            );
+          }),
+        );
+
+        final results = await service.search('topic with two results');
+
+        expect(results, hasLength(2));
+        expect(results.map((result) => result.title), [
+          'Tavily result',
+          'TinyFish result',
+        ]);
+      },
+    );
 
     test(
       'uses Firecrawl without an API key and accepts fewer than three',
@@ -102,7 +168,7 @@ void main() {
             expect(request.headers.containsKey('authorization'), isFalse);
             expect(jsonDecode(request.body), {
               'query': 'local search',
-              'limit': 5,
+              'limit': 100,
             });
             return http.Response(
               jsonEncode({
@@ -162,26 +228,33 @@ void main() {
       expect(results, hasLength(3));
     });
 
-    test('reports an explicit error when every configured provider fails',
-        () async {
-      final config = _MemoryAiConfigStore()
-        ..values[WebSearchConfigKeys.tavilyApiKey] = 'bad-tavily-key';
-      final service = WebSearchService(
-        configStore: config,
-        client: MockClient((request) async => http.Response('unavailable', 503)),
-      );
-
-      await expectLater(
-        service.search('unavailable topic'),
-        throwsA(
-          isA<WebSearchException>().having(
-            (error) => error.message,
-            'message',
-            allOf(contains('Tavily: HTTP 503'), contains('Firecrawl: HTTP 503')),
+    test(
+      'reports an explicit error when every configured provider fails',
+      () async {
+        final config = _MemoryAiConfigStore()
+          ..values[WebSearchConfigKeys.tavilyApiKey] = 'bad-tavily-key';
+        final service = WebSearchService(
+          configStore: config,
+          client: MockClient(
+            (request) async => http.Response('unavailable', 503),
           ),
-        ),
-      );
-    });
+        );
+
+        await expectLater(
+          service.search('unavailable topic'),
+          throwsA(
+            isA<WebSearchException>().having(
+              (error) => error.message,
+              'message',
+              allOf(
+                contains('Tavily: HTTP 503'),
+                contains('Firecrawl: HTTP 503'),
+              ),
+            ),
+          ),
+        );
+      },
+    );
   });
 }
 

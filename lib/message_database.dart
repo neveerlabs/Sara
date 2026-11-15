@@ -240,6 +240,10 @@ abstract interface class MessageStore {
   Future<void> expireAttachments(int nowUtc);
   Future<void> clearAttachmentPaths(List<String> paths);
   Future<void> saveMessage(ChatMessage message);
+  Future<void> saveClarificationProgress(
+    String messageId,
+    ClarificationPrompt clarification,
+  );
   Future<void> appendMessage(ChatMessage message);
   Future<bool> appendMessageIfActiveLeaf(
     ChatMessage message, {
@@ -331,7 +335,7 @@ class SqliteMessageStore implements MessageStore {
     final database = await databaseFactory.openDatabase(
       databasePath,
       options: OpenDatabaseOptions(
-        version: 26,
+        version: 27,
         onCreate: (database, version) async {
           await _createMessageTable(database);
           await _createPersonalTable(database);
@@ -413,6 +417,9 @@ class SqliteMessageStore implements MessageStore {
           if (oldVersion < 26) {
             await _createUserMemoryTables(database);
           }
+          if (oldVersion < 27) {
+            await _migrateClarificationData(database);
+          }
         },
       ),
     );
@@ -430,7 +437,8 @@ class SqliteMessageStore implements MessageStore {
         rating INTEGER CHECK (rating IN (-1, 1)),
         reaction TEXT,
         parent_message_id TEXT,
-        terminal_command_data TEXT NOT NULL DEFAULT '[]'
+        terminal_command_data TEXT NOT NULL DEFAULT '[]',
+        clarification_data TEXT
       )
     ''');
     await database.execute(
@@ -847,6 +855,17 @@ class SqliteMessageStore implements MessageStore {
       await database.execute('DROP TABLE terminal_command_activity_link');
     }
     await database.execute('DROP TABLE terminal_command_history');
+  }
+
+  static Future<void> _migrateClarificationData(
+    DatabaseExecutor database,
+  ) async {
+    if (await _tableExists(database, 'message') &&
+        !await _columnExists(database, 'message', 'clarification_data')) {
+      await database.execute(
+        'ALTER TABLE message ADD COLUMN clarification_data TEXT',
+      );
+    }
   }
 
   static Future<void> _createBranchTables(DatabaseExecutor database) async {
@@ -1330,6 +1349,22 @@ class SqliteMessageStore implements MessageStore {
       message.toMap(),
       conflictAlgorithm: ConflictAlgorithm.abort,
     );
+  }
+
+  @override
+  Future<void> saveClarificationProgress(
+    String messageId,
+    ClarificationPrompt clarification,
+  ) async {
+    final updatedRows = await _database.update(
+      'message',
+      {'clarification_data': jsonEncode(clarification.toMap())},
+      where: 'id = ? AND role = ?',
+      whereArgs: [messageId, 'model'],
+    );
+    if (updatedRows != 1) {
+      throw StateError('Clarification message is missing.');
+    }
   }
 
   @override
@@ -1992,6 +2027,7 @@ class SqliteMessageStore implements MessageStore {
     for (final row in messages) {
       row.remove('type');
       row.putIfAbsent('terminal_command_data', () => '[]');
+      row.putIfAbsent('clarification_data', () => null);
     }
     final messageIds = messages.map((row) => row['id']).toSet();
     final messageRows = {for (final row in messages) row['id']: row};
@@ -2004,6 +2040,25 @@ class SqliteMessageStore implements MessageStore {
         throw const FormatException(
           'Backup contains invalid message feedback.',
         );
+      }
+      final rawClarification = row['clarification_data'];
+      if (rawClarification != null) {
+        if (rawClarification is! String) {
+          throw const FormatException(
+            'Backup contains invalid clarification data.',
+          );
+        }
+        try {
+          final decoded = jsonDecode(rawClarification);
+          if (decoded is! Map || decoded.keys.any((key) => key is! String)) {
+            throw const FormatException();
+          }
+          ClarificationPrompt.fromMap(Map<String, Object?>.from(decoded));
+        } on FormatException {
+          throw const FormatException(
+            'Backup contains invalid clarification data.',
+          );
+        }
       }
       final parentId = row['parent_message_id'];
       if (parentId != null && !messageIds.contains(parentId)) {

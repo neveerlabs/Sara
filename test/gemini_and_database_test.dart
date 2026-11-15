@@ -52,6 +52,96 @@ void main() {
     );
   });
 
+  test('SQLite version 26 migrates and persists clarification cards', () async {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+    final directory = await Directory.systemTemp.createTemp(
+      'sara-v26-clarification-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final databasePath = path.join(directory.path, 'message.sql');
+    final legacyDatabase = await databaseFactory.openDatabase(
+      databasePath,
+      options: OpenDatabaseOptions(
+        version: 26,
+        onCreate: (database, version) async {
+          await database.execute('''
+            CREATE TABLE message (
+              id TEXT PRIMARY KEY NOT NULL,
+              role TEXT NOT NULL CHECK (role IN ('user', 'model')),
+              content TEXT NOT NULL,
+              timestamp TEXT NOT NULL,
+              created_at_utc INTEGER NOT NULL,
+              rating INTEGER CHECK (rating IN (-1, 1)),
+              reaction TEXT,
+              parent_message_id TEXT,
+              terminal_command_data TEXT NOT NULL DEFAULT '[]'
+            )
+          ''');
+        },
+      ),
+    );
+    await legacyDatabase.close();
+    final store = await SqliteMessageStore.openAtPath(databasePath);
+    addTearDown(store.close);
+    const clarification = ClarificationPrompt(
+      questions: [
+        ClarificationQuestion(
+          question: 'Which platform do you mean?',
+          options: ['Android', 'iOS', 'Both'],
+        ),
+        ClarificationQuestion(
+          question: 'Which operating system do you use?',
+          options: ['Linux', 'Windows', 'macOS'],
+        ),
+      ],
+    );
+    await store.saveMessage(
+      ChatMessage(
+        id: 'migrated-clarification',
+        role: 'model',
+        content: clarification.question,
+        timestamp: 'today',
+        createdAtUtc: 1,
+        clarification: clarification,
+      ),
+    );
+
+    final restored = (await store.loadMessages()).single;
+    expect(
+      restored.clarification?.questions.map((question) => question.question),
+      clarification.questions.map((question) => question.question),
+    );
+    expect(restored.clarification?.answerAt(0), isNull);
+    final answered = clarification.withAnswer(0, 'Android');
+    await store.saveClarificationProgress('migrated-clarification', answered);
+    final updated = (await store.loadMessages()).single.clarification!;
+    expect(updated.answerAt(0), 'Android');
+    expect(updated.answerAt(1), isNull);
+  });
+
+  test('legacy clarification data decodes as a single-question sequence', () {
+    final restored = ChatMessage.fromMap({
+      'id': 'legacy-clarification',
+      'role': 'model',
+      'content': 'Which platform do you mean?',
+      'timestamp': 'today',
+      'created_at_utc': 1,
+      'parent_message_id': null,
+      'rating': null,
+      'reaction': null,
+      'terminal_command_data': '[]',
+      'clarification_data': jsonEncode({
+        'question': 'Which platform do you mean?',
+        'options': ['Android', 'iOS'],
+      }),
+    });
+
+    expect(restored.clarification?.questions, hasLength(1));
+    expect(restored.clarification?.question, 'Which platform do you mean?');
+    expect(restored.clarification?.options, ['Android', 'iOS']);
+  });
+
   group('GeminiReplyService', () {
     test(
       'regenerate request includes previous alternative replies as context',
@@ -145,6 +235,151 @@ void main() {
         'Hello there',
       );
       expect(updates, ['Hello', 'Hello there']);
+    });
+
+    test('asks and remembers a structured clarification', () async {
+      SharedPreferences.setMockInitialValues({});
+      final preferences = await SharedPreferences.getInstance();
+      final config = _MemoryAiConfigStore()
+        ..apiKeys = ['clarification-key']
+        ..values['ai_model'] = 'gemini-3.5-flash-lite';
+      var requests = 0;
+      final service = GeminiReplyService(
+        configStore: config,
+        preferences: preferences,
+        client: MockClient((request) async {
+          requests++;
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          final instructions =
+              body['systemInstruction']['parts'][0]['text'] as String;
+          expect(instructions, contains('ask_user_clarification'));
+          expect(instructions, contains('never a quiz, test, survey'));
+          expect(instructions, contains('advances after each answer'));
+          expect(
+            instructions,
+            contains('complete question ending in a question mark'),
+          );
+          expect(
+            instructions,
+            contains('never phrase an option as another question'),
+          );
+          final declarations =
+              (body['tools'][0]['functionDeclarations'] as List)
+                  .cast<Map<String, dynamic>>();
+          final clarificationTool = declarations.singleWhere(
+            (tool) => tool['name'] == 'ask_user_clarification',
+          );
+          expect(
+            clarificationTool['description'],
+            contains('complete question ending in a question mark'),
+          );
+          expect(
+            clarificationTool['description'],
+            contains('concise, distinct answer choice'),
+          );
+          expect(
+            clarificationTool['parameters']['properties']['questions']['type'],
+            'ARRAY',
+          );
+          expect(
+            clarificationTool['parameters']['properties']['questions']['items']['properties']['options']['type'],
+            'ARRAY',
+          );
+
+          if (requests == 1) {
+            return http.Response(
+              'data: {"candidates":[{"content":{"parts":[{"functionCall":'
+              '{"name":"ask_user_clarification","args":'
+              '{"questions":['
+              '{"question":"Which platform do you mean?",'
+              '"options":["Android","iOS","Both"]},'
+              '{"question":"Which operating system do you use?",'
+              '"options":["Linux","Windows","macOS"]}]}}}]}}]}\n\n',
+              200,
+              headers: {'content-type': 'text/event-stream'},
+            );
+          }
+
+          final history = body['contents'] as List;
+          final serializedMessages = history
+              .expand(
+                (entry) => (entry as Map<String, dynamic>)['parts'] as List,
+              )
+              .whereType<Map<String, dynamic>>()
+              .where((part) => part['text'] is String)
+              .map((part) => jsonDecode(part['text'] as String))
+              .whereType<Map<String, dynamic>>();
+          expect(
+            serializedMessages.singleWhere(
+              (message) => message.containsKey('clarification'),
+            )['clarification'],
+            {
+              'questions': [
+                {
+                  'question': 'Which platform do you mean?',
+                  'options': ['Android', 'iOS', 'Both'],
+                },
+                {
+                  'question': 'Which operating system do you use?',
+                  'options': ['Linux', 'Windows', 'macOS'],
+                },
+              ],
+              'answers': ['Android', 'Linux'],
+            },
+          );
+          return http.Response(
+            'data: {"candidates":[{"content":{"parts":[{"text":"Thanks, got it."}]}}]}\n\n',
+            200,
+            headers: {'content-type': 'text/event-stream'},
+          );
+        }),
+      );
+
+      ClarificationPrompt? clarification;
+      expect(
+        await service.generateReply([
+          _userMessage,
+        ], onClarification: (value) => clarification = value),
+        isEmpty,
+      );
+      expect(clarification?.question, 'Which platform do you mean?');
+      expect(clarification?.options, ['Android', 'iOS', 'Both']);
+      expect(clarification?.questions.map((question) => question.question), [
+        'Which platform do you mean?',
+        'Which operating system do you use?',
+      ]);
+      expect(requests, 1);
+
+      final clarificationMessage = ChatMessage(
+        id: 'clarification-response',
+        role: 'model',
+        content: clarification!.question,
+        timestamp: 'today',
+        createdAtUtc: _userMessage.createdAtUtc + 1,
+        parentMessageId: _userMessage.id,
+        clarification: clarification!
+            .withAnswer(0, 'Android')
+            .withAnswer(1, 'Linux'),
+      );
+      final answer = ChatMessage(
+        id: 'clarification-answer',
+        role: 'user',
+        content:
+            'Which platform do you mean?\nAndroid\n\n'
+            'Which operating system do you use?\nLinux',
+        timestamp: 'today',
+        createdAtUtc: _userMessage.createdAtUtc + 2,
+        parentMessageId: clarificationMessage.id,
+      );
+      expect(
+        await service.generateReply([
+          _userMessage,
+          clarificationMessage,
+          answer,
+        ]),
+        'Thanks, got it.',
+      );
+      expect(requests, 2);
     });
 
     test('appends links to the web sources actually used in the reply', () async {
@@ -995,7 +1230,12 @@ void main() {
           ),
           'No file',
         );
-        expect(requestBody!.containsKey('tools'), isFalse);
+        final declarations =
+            (requestBody!['tools'][0]['functionDeclarations'] as List)
+                .cast<Map<String, dynamic>>();
+        expect(declarations.map((declaration) => declaration['name']), [
+          'ask_user_clarification',
+        ]);
         expect((requestBody!['contents'][0]['parts'] as List), hasLength(1));
       },
     );
@@ -1639,6 +1879,10 @@ void main() {
 
       expect(thinkerRequests, 1);
       expect(
+        (thinkerBody!['generationConfig'] as Map)['maxOutputTokens'],
+        2048,
+      );
+      expect(
         ((thinkerBody!['contents'] as List).single['parts'] as List)
             .single['text'],
         contains('"new_exchanges"'),
@@ -1670,6 +1914,73 @@ void main() {
         (await store.loadConversationTopicSummaries()).single.throughMessageId,
         exchanges.last.$2.id,
       );
+    });
+
+    test('reports truncated Gemini memory responses explicitly', () async {
+      SharedPreferences.setMockInitialValues({});
+      final preferences = await SharedPreferences.getInstance();
+      final directory = await Directory.systemTemp.createTemp(
+        'sara-rag-truncated-',
+      );
+      final store = await SqliteMessageStore.openAtPath(
+        path.join(directory.path, 'message.sql'),
+      );
+      addTearDown(() async {
+        await store.close();
+        await directory.delete(recursive: true);
+      });
+      final user = _message(id: 'truncated-user', createdAtUtc: 1);
+      final model = _message(
+        id: 'truncated-model',
+        role: 'model',
+        createdAtUtc: 2,
+        parentMessageId: user.id,
+      );
+      await store.saveExchange([user, model]);
+      final config = _MemoryAiConfigStore()
+        ..apiKeys = ['truncated-key']
+        ..values['ai_model'] = 'gemini-3.5-flash-lite';
+      Object? backgroundError;
+      final service = ConversationRagService(
+        messageStore: store,
+        configStore: config,
+        preferences: preferences,
+        embeddingProvider: const _FixedEmbeddingProvider(),
+        onBackgroundError: (error) => backgroundError = error,
+        client: MockClient((request) async {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          expect((body['generationConfig'] as Map)['maxOutputTokens'], 2048);
+          return http.Response(
+            jsonEncode({
+              'candidates': [
+                {
+                  'finishReason': 'MAX_TOKENS',
+                  'content': {
+                    'parts': [
+                      {'text': '{"title":"Incomplete'},
+                    ],
+                  },
+                },
+              ],
+            }),
+            200,
+          );
+        }),
+      );
+      addTearDown(service.dispose);
+
+      await service.saveExchangeMemory(
+        context: const ConversationRagContext(),
+        userMessage: user,
+        modelMessage: model,
+      );
+
+      expect(
+        backgroundError.toString(),
+        contains('output token limit for conversation memory'),
+      );
+      expect(await store.loadConversationMemoryJobs(), hasLength(1));
+      expect(await store.loadConversationTopicSummaries(), isEmpty);
     });
 
     test(
@@ -3237,6 +3548,7 @@ void main() {
           createdAtUtc: DateTime.utc(2026, 11, 6, 17).millisecondsSinceEpoch,
         ).toMap()
         ..remove('terminal_command_data')
+        ..remove('clarification_data')
         ..remove('parent_message_id')
         ..remove('rating')
         ..remove('reaction')
@@ -3647,6 +3959,7 @@ void main() {
         'message',
         (_message(id: 'legacy-user', createdAtUtc: createdAt).toMap()
           ..remove('terminal_command_data')
+          ..remove('clarification_data')
           ..remove('parent_message_id')
           ..remove('rating')
           ..remove('reaction')

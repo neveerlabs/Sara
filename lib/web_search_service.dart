@@ -67,6 +67,19 @@ class WebSearchService {
       WebSearchConfigKeys.firecrawlApiKey,
     );
     final failures = <String>[];
+    final collectedResults = <WebSearchResult>[];
+    final seenUrls = <String>{};
+
+    void collectUniqueResults(List<WebSearchResult>? results) {
+      if (results == null) return;
+      for (final result in results) {
+        if (seenUrls.add(result.url)) collectedResults.add(result);
+      }
+    }
+
+    List<WebSearchResult> snapshotResults() =>
+        collectedResults.toList(growable: false);
+
     final tavilyKey = tavilyApiKey?.trim();
     if (tavilyKey != null && tavilyKey.isNotEmpty) {
       final results = await _tryProvider(
@@ -74,8 +87,9 @@ class WebSearchService {
         failures,
         () => _searchTavily(normalizedQuery, tavilyKey),
       );
-      if (results != null && results.length >= 3) {
-        return results.take(5).toList(growable: false);
+      collectUniqueResults(results);
+      if (collectedResults.length >= 3) {
+        return snapshotResults();
       }
       if (results != null) failures.add('Tavily returned fewer than 3 results');
     }
@@ -87,8 +101,9 @@ class WebSearchService {
         failures,
         () => _searchTinyFish(normalizedQuery, tinyFishKey),
       );
-      if (results != null && results.length >= 3) {
-        return results.take(5).toList(growable: false);
+      collectUniqueResults(results);
+      if (collectedResults.length >= 3) {
+        return snapshotResults();
       }
       if (results != null) {
         failures.add('TinyFish returned fewer than 3 results');
@@ -104,8 +119,9 @@ class WebSearchService {
         firecrawlKey == null || firecrawlKey.isEmpty ? null : firecrawlKey,
       ),
     );
-    if (firecrawlResults != null && firecrawlResults.isNotEmpty) {
-      return firecrawlResults.take(5).toList(growable: false);
+    collectUniqueResults(firecrawlResults);
+    if (collectedResults.isNotEmpty) {
+      return snapshotResults();
     }
     if (firecrawlResults != null) {
       failures.add('Firecrawl returned no usable results');
@@ -147,7 +163,7 @@ class WebSearchService {
           body: jsonEncode({
             'query': query,
             'search_depth': 'basic',
-            'max_results': 5,
+            'max_results': 20,
           }),
         )
         .timeout(requestTimeout);
@@ -187,7 +203,7 @@ class WebSearchService {
         .post(
           Uri.parse('https://api.firecrawl.dev/v2/search'),
           headers: headers,
-          body: jsonEncode({'query': query, 'limit': 5}),
+          body: jsonEncode({'query': query, 'limit': 100}),
         )
         .timeout(requestTimeout);
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -229,7 +245,6 @@ class WebSearchService {
           snippet: snippet.length > 1200 ? snippet.substring(0, 1200) : snippet,
         ),
       );
-      if (results.length == 5) break;
     }
     return results;
   }

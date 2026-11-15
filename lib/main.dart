@@ -133,7 +133,7 @@ Future<Uint8List?> _readClipboardImageFromSystem() async {
   return null;
 }
 
-const _canvas = Color(0xFF18191C);
+const _canvas = Color(0xFF000000);
 const _surface = Color(0xFF202124);
 const _surfaceRaised = Color(0xFF2A2B2F);
 const _border = Color(0xFF424449);
@@ -278,11 +278,13 @@ OverlayEntry? _activeToast;
 Timer? _activeToastTimer;
 Future<void> Function(String message)? _notifyUnseenError;
 
-Future<void> _copyToastMessage(String message) async {
+Future<bool> _copyToastMessage(String message) async {
   try {
     await Clipboard.setData(ClipboardData(text: message));
+    return true;
   } catch (error) {
     debugPrint('Could not copy error details from toast: $error');
+    return false;
   }
 }
 
@@ -307,6 +309,8 @@ void _showToast(
   if (_activeToast?.mounted ?? false) _activeToast!.remove();
 
   final cleanMessage = message.trim().replaceAll(RegExp(r'[.!?]+$'), '');
+  var errorCopied = false;
+  var isCopyingError = false;
   late final OverlayEntry entry;
   entry = OverlayEntry(
     builder: (context) => Positioned(
@@ -334,44 +338,62 @@ void _showToast(
             ),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Flexible(
-                    child: Text(
-                      cleanMessage,
-                      maxLines: isError ? 2 : 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
+              child: StatefulBuilder(
+                builder: (context, setToastState) => Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Text(
+                        cleanMessage,
+                        maxLines: isError ? 2 : 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: _text,
+                          inherit: false,
+                          fontSize: 12,
+                          height: 1.15,
+                          fontWeight: FontWeight.w500,
+                          decoration: TextDecoration.none,
+                          decorationColor: Colors.transparent,
+                        ),
+                      ),
+                    ),
+                    if (isError) ...[
+                      const SizedBox(width: 8),
+                      IconButton(
+                        key: const ValueKey('copy-toast-error'),
+                        tooltip: appText(
+                          errorCopied ? 'Copied' : 'Copy error details',
+                        ),
+                        onPressed: errorCopied || isCopyingError
+                            ? null
+                            : () async {
+                                setToastState(() => isCopyingError = true);
+                                final copied = await _copyToastMessage(message);
+                                if (!entry.mounted) return;
+                                setToastState(() {
+                                  isCopyingError = false;
+                                  errorCopied = copied;
+                                });
+                              },
+                        icon: Icon(
+                          errorCopied
+                              ? LucideIcons300.check
+                              : LucideIcons300.copy,
+                        ),
                         color: _text,
-                        inherit: false,
-                        fontSize: 12,
-                        height: 1.15,
-                        fontWeight: FontWeight.w500,
-                        decoration: TextDecoration.none,
-                        decorationColor: Colors.transparent,
+                        iconSize: 16,
+                        visualDensity: VisualDensity.compact,
+                        constraints: const BoxConstraints.tightFor(
+                          width: 30,
+                          height: 30,
+                        ),
+                        padding: EdgeInsets.zero,
                       ),
-                    ),
-                  ),
-                  if (isError) ...[
-                    const SizedBox(width: 8),
-                    IconButton(
-                      key: const ValueKey('copy-toast-error'),
-                      tooltip: appText('Copy error details'),
-                      onPressed: () => unawaited(_copyToastMessage(message)),
-                      icon: const Icon(LucideIcons300.copy),
-                      color: _text,
-                      iconSize: 16,
-                      visualDensity: VisualDensity.compact,
-                      constraints: const BoxConstraints.tightFor(
-                        width: 30,
-                        height: 30,
-                      ),
-                      padding: EdgeInsets.zero,
-                    ),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
           ),
@@ -441,6 +463,8 @@ class SaraApp extends StatefulWidget {
     this.cameraCacheCleaner,
     this.notificationService,
     this.notificationSoundPlayer,
+    this.linkPreviewService,
+    this.openExternalLink,
   });
 
   final AiConfigStore configStore;
@@ -454,6 +478,8 @@ class SaraApp extends StatefulWidget {
   final Future<void> Function(MessageStore messageStore)? cameraCacheCleaner;
   final DesktopNotificationService? notificationService;
   final Future<void> Function(String assetPath)? notificationSoundPlayer;
+  final LinkPreviewService? linkPreviewService;
+  final Future<void> Function(Uri uri)? openExternalLink;
 
   @override
   State<SaraApp> createState() => _SaraAppState();
@@ -537,6 +563,8 @@ class _SaraAppState extends State<SaraApp> {
           cameraCacheCleaner: widget.cameraCacheCleaner,
           notificationService: widget.notificationService,
           notificationSoundPlayer: widget.notificationSoundPlayer,
+          linkPreviewService: widget.linkPreviewService,
+          openExternalLink: widget.openExternalLink,
         ),
       ),
     );
@@ -557,6 +585,8 @@ class ChatPage extends StatefulWidget {
     this.cameraCacheCleaner,
     this.notificationService,
     this.notificationSoundPlayer,
+    this.linkPreviewService,
+    this.openExternalLink,
   });
 
   final AiConfigStore configStore;
@@ -570,6 +600,8 @@ class ChatPage extends StatefulWidget {
   final Future<void> Function(MessageStore messageStore)? cameraCacheCleaner;
   final DesktopNotificationService? notificationService;
   final Future<void> Function(String assetPath)? notificationSoundPlayer;
+  final LinkPreviewService? linkPreviewService;
+  final Future<void> Function(Uri uri)? openExternalLink;
 
   @override
   State<ChatPage> createState() => _ChatPageState();
@@ -611,6 +643,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   late final Future<void> Function(String message) _unseenErrorHandler;
   bool _isLoadingHistory = true;
   bool _isSending = false;
+  bool _isSavingClarification = false;
   bool _proactiveModeAllows = false;
   Completer<void>? _proactiveAppendCompletion;
   bool _isDraggingFiles = false;
@@ -623,6 +656,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   String? _streamingResponseMessageId;
   String? _activeReplyResponseMessageId;
   late final SpeechPlaybackController _speechPlaybackController;
+  late final LinkPreviewService _linkPreviewService =
+      widget.linkPreviewService ?? LinkPreviewService();
 
   @override
   void initState() {
@@ -1235,13 +1270,118 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     await _proactiveAppendCompletion?.future;
   }
 
+  Future<bool> _answerClarification(
+    String messageId,
+    int questionIndex,
+    String answer,
+  ) async {
+    if (_isSending || _isSavingClarification) return false;
+    final messageIndex = _messages.indexWhere(
+      (message) => message.id == messageId,
+    );
+    final messageStore = _messageStore;
+    if (messageIndex < 0 || _messages[messageIndex].clarification == null) {
+      _showMessage(appText('This clarification is no longer available.'));
+      return false;
+    }
+    if (messageStore == null) {
+      _showMessage(
+        appText('Local chat storage is not ready. Please try again shortly.'),
+      );
+      return false;
+    }
+
+    final message = _messages[messageIndex];
+    final clarification = message.clarification!;
+    var nextUnansweredQuestion = 0;
+    while (nextUnansweredQuestion < clarification.questions.length &&
+        clarification.answerAt(nextUnansweredQuestion) != null) {
+      nextUnansweredQuestion++;
+    }
+    if (questionIndex != nextUnansweredQuestion) {
+      return false;
+    }
+    late final ClarificationPrompt updatedClarification;
+    try {
+      updatedClarification = clarification.withAnswer(questionIndex, answer);
+    } on FormatException {
+      _showMessage(appText('Please enter a valid clarification answer.'));
+      return false;
+    } on RangeError {
+      _showMessage(appText('This clarification is no longer available.'));
+      return false;
+    }
+
+    setState(() => _isSavingClarification = true);
+    try {
+      await messageStore.saveClarificationProgress(
+        messageId,
+        updatedClarification,
+      );
+    } catch (error) {
+      if (mounted) setState(() => _isSavingClarification = false);
+      _showMessage(
+        appText(
+          'Could not save clarification answer: {error}',
+          values: {'error': error},
+        ),
+      );
+      return false;
+    }
+    if (!mounted) return false;
+
+    final updatedMessageIndex = _messages.indexWhere(
+      (candidate) => candidate.id == messageId,
+    );
+    if (updatedMessageIndex < 0) {
+      setState(() => _isSavingClarification = false);
+      _showMessage(appText('This clarification is no longer available.'));
+      return false;
+    }
+    setState(() {
+      _messages[updatedMessageIndex] = _messages[updatedMessageIndex]
+          .withClarification(updatedClarification);
+      _isSavingClarification = false;
+    });
+    if (updatedClarification.isComplete) {
+      unawaited(_submitClarificationAnswers(messageId));
+    }
+    return true;
+  }
+
+  Future<void> _submitClarificationAnswers(String messageId) async {
+    if (_isSending || _isSavingClarification) return;
+    final messageIndex = _messages.indexWhere(
+      (message) => message.id == messageId,
+    );
+    if (messageIndex < 0) return;
+    final clarification = _messages[messageIndex].clarification;
+    if (clarification == null || !clarification.isComplete) return;
+    if (_messages.any(
+      (message) =>
+          message.role == 'user' && message.parentMessageId == messageId,
+    )) {
+      return;
+    }
+    final answers = clarification.questions
+        .asMap()
+        .entries
+        .map((entry) {
+          final answer = clarification.answerAt(entry.key);
+          if (answer == null) throw StateError('Clarification is incomplete.');
+          return '${entry.value.question}\n$answer';
+        })
+        .join('\n\n');
+    await _sendMessage(answers);
+  }
+
   Future<void> _sendMessage(
     String? suggestion, [
     List<ChatAttachment> attachments = const [],
     bool allowAiReply = true,
   ]) async {
     await _waitForProactiveAppend();
-    if (_isSending) return;
+    if (_isSending || _isSavingClarification) return;
     final text = (suggestion ?? _messageController.text).trim();
     if (text.isEmpty && attachments.isEmpty) return;
 
@@ -1742,14 +1882,19 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       return;
     }
     try {
-      final result = await Process.run('xdg-open', [uri.toString()]);
-      if (result.exitCode != 0) {
-        throw ProcessException(
-          'xdg-open',
-          [uri.toString()],
-          result.stderr.toString(),
-          result.exitCode,
-        );
+      final openExternalLink = widget.openExternalLink;
+      if (openExternalLink != null) {
+        await openExternalLink(uri);
+      } else {
+        final result = await Process.run('xdg-open', [uri.toString()]);
+        if (result.exitCode != 0) {
+          throw ProcessException(
+            'xdg-open',
+            [uri.toString()],
+            result.stderr.toString(),
+            result.exitCode,
+          );
+        }
       }
     } catch (error) {
       if (!mounted) return;
@@ -1986,6 +2131,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
 
     List<ChatAttachment> generatedAttachments = const [];
+    ClarificationPrompt? generatedClarification;
     try {
       final personalName = await messageStore.readPersonalName();
       final persistedHistory = await messageStore.loadActiveMessages();
@@ -2019,6 +2165,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           }
         },
         onText: receiveStreamedText,
+        onClarification: (clarification) =>
+            generatedClarification = clarification,
         onMedia: (attachments) => generatedAttachments = attachments,
         captureCameraFrame: _cameraToolAvailable ? _captureFrameForSara : null,
         approveTerminalCommand: _requestTerminalCommandApproval,
@@ -2035,7 +2183,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
             _recordTerminalCommandResult(result, userMessage.id),
       );
       finishTypewriter();
-      if (reply.trim().isEmpty && generatedAttachments.isEmpty) {
+      if (reply.trim().isEmpty &&
+          generatedAttachments.isEmpty &&
+          generatedClarification == null) {
         if (replyService is GeminiReplyService) {
           try {
             await replyService.saveConversationMemory(
@@ -2073,17 +2223,19 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       final modelMessage = streamedMessage == null
           ? _newMessage(
               role: 'model',
-              content: reply,
+              content: generatedClarification?.question ?? reply,
               parentMessageId: userMessage.id,
               id: responseMessageId,
+              clarification: generatedClarification,
             )
           : ChatMessage(
               id: streamedMessage!.id,
               role: 'model',
-              content: reply,
+              content: generatedClarification?.question ?? reply,
               timestamp: streamedMessage!.timestamp,
               createdAtUtc: streamedMessage!.createdAtUtc,
               parentMessageId: userMessage.id,
+              clarification: generatedClarification,
             );
       final terminalActivities =
           _terminalActivitiesByResponse[responseMessageId] ??
@@ -2258,6 +2410,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     required String content,
     String? parentMessageId,
     String? id,
+    ClarificationPrompt? clarification,
   }) {
     final createdAtUtc = DateTime.now().toUtc().millisecondsSinceEpoch;
     return ChatMessage(
@@ -2267,6 +2420,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
       timestamp: formatJakartaTimestamp(createdAtUtc),
       createdAtUtc: createdAtUtc,
       parentMessageId: parentMessageId,
+      clarification: clarification,
     );
   }
 
@@ -2698,307 +2852,307 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                   setState(() => _isDraggingFiles = false);
                   _composerKey.currentState?.addDroppedFiles(details.files);
                 },
-                child: ColoredBox(
-                  color: _canvas,
-                  child: Stack(
-                    children: [
+                child: Stack(
+                  children: [
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      height: 14,
+                      child: IgnorePointer(
+                        child: ColoredBox(
+                          key: const ValueKey('footer-bottom-background'),
+                          color: _canvas,
+                        ),
+                      ),
+                    ),
+                    Positioned.fill(
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          final panelWidth = constraints.maxWidth < 800
+                              ? constraints.maxWidth * 0.42
+                              : 390.0;
+                          return Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  children: [
+                                    Expanded(
+                                      child: _isLoadingHistory
+                                          ? const Center(
+                                              child:
+                                                  CircularProgressIndicator(),
+                                            )
+                                          : visibleMessages.isEmpty
+                                          ? const _WelcomeView()
+                                          : ListenableBuilder(
+                                              listenable: Listenable.merge([
+                                                _speechPlaybackController
+                                                    .speakingMessageId,
+                                                _speechPlaybackController
+                                                    .loadingMessageId,
+                                              ]),
+                                              builder: (context, _) => _ConversationView(
+                                                messages: visibleMessages,
+                                                linkPreviewService:
+                                                    _linkPreviewService,
+                                                onOpenLink:
+                                                    _openSearchResultLink,
+                                                scrollController:
+                                                    _scrollController,
+                                                isSending:
+                                                    _isSending ||
+                                                    _isSavingClarification,
+                                                showReplyIndicator:
+                                                    _isSending &&
+                                                    !_hasStreamedReply,
+                                                retryErrors: _retryErrors,
+                                                onRetryMessage: _retryMessage,
+                                                onDeleteMessage:
+                                                    _deleteMessageAndFollowing,
+                                                onEditMessage:
+                                                    _submitEditedMessage,
+                                                onProactiveModeChanged:
+                                                    _recordConversationProactiveMode,
+                                                messageBranches:
+                                                    _messageBranches,
+                                                onActivateBranch:
+                                                    _activateMessageBranch,
+                                                onRegenerateMessage:
+                                                    _regenerateMessage,
+                                                attachmentsByMessage:
+                                                    _attachmentsByMessage,
+                                                terminalActivitiesByResponse:
+                                                    _terminalActivitiesByResponse,
+                                                activeReplyResponseMessageId:
+                                                    _activeReplyResponseMessageId,
+                                                assistantFeedback:
+                                                    _assistantFeedback,
+                                                onSetAssistantFeedback:
+                                                    _setAssistantFeedback,
+                                                assistantReactions:
+                                                    _assistantReactions,
+                                                onSetAssistantReaction:
+                                                    _setAssistantReaction,
+                                                speakingMessageId:
+                                                    _speechPlaybackController
+                                                        .speakingMessageId
+                                                        .value,
+                                                loadingSpeechMessageId:
+                                                    _speechPlaybackController
+                                                        .loadingMessageId
+                                                        .value,
+                                                onToggleSpeech: _toggleSpeech,
+                                                showScrollToBottom:
+                                                    _showScrollToBottom,
+                                                onScrollToBottom:
+                                                    _scrollToLatest,
+                                                onScrollMetricsChanged:
+                                                    _handleScroll,
+                                                onUserScroll: _handleUserScroll,
+                                                onShowSearchResults:
+                                                    (messageId) => setState(() {
+                                                      _searchResultsMessageId =
+                                                          messageId;
+                                                    }),
+                                                onAnswerClarification:
+                                                    _answerClarification,
+                                                onSubmitClarification:
+                                                    (messageId) => unawaited(
+                                                      _submitClarificationAnswers(
+                                                        messageId,
+                                                      ),
+                                                    ),
+                                              ),
+                                            ),
+                                    ),
+                                    ConstrainedBox(
+                                      constraints: BoxConstraints(
+                                        maxHeight: constraints.maxHeight,
+                                      ),
+                                      child: _Composer(
+                                        key: _composerKey,
+                                        controller: _messageController,
+                                        focusNode: _messageFocus,
+                                        onSend: _sendMessage,
+                                        onModeChanged:
+                                            _recordConversationProactiveMode,
+                                        isWaitingForReply:
+                                            _isSavingClarification ||
+                                            (_isSending && !_hasStreamedReply),
+                                        showInlineSettings: showInlineSettings,
+                                        onOpenSettings: _openSettings,
+                                        clipboardImageReader:
+                                            widget.clipboardImageReader,
+                                        clipboardImageSaver:
+                                            widget.clipboardImageSaver,
+                                        cameraSessionFactory:
+                                            widget.cameraSessionFactory,
+                                        cameraImageSaver:
+                                            widget.cameraImageSaver,
+                                        pendingTerminalCommandApproval:
+                                            _pendingTerminalCommandApproval,
+                                        terminalCommandActivity:
+                                            _terminalCommandActivity,
+                                        terminalCommandOutput: [
+                                          if (_terminalCommandStdout.isNotEmpty)
+                                            _terminalCommandStdout,
+                                          if (_terminalCommandStderr.isNotEmpty)
+                                            'stderr:\n$_terminalCommandStderr',
+                                        ].join('\n'),
+                                        terminalCommandRunning:
+                                            _terminalCommandRunning,
+                                        terminalCommandAutomaticallyAllowed:
+                                            _terminalCommandAutomaticallyAllowed,
+                                        onTerminalCommandDecision:
+                                            _decideTerminalCommand,
+                                        onStopTerminalCommand:
+                                            _stopTerminalCommand,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              AnimatedContainer(
+                                duration: const Duration(milliseconds: 220),
+                                curve: Curves.easeInOut,
+                                width: showSearchResultsPanel ? panelWidth : 0,
+                                child: showSearchResultsPanel
+                                    ? _SearchResultsPanel(
+                                        sources: selectedSearchSources,
+                                        messageDate: selectedSearchDate,
+                                        onClose: () => setState(
+                                          () => _searchResultsMessageId = null,
+                                        ),
+                                        onOpen: _openSearchResultLink,
+                                      )
+                                    : const SizedBox.shrink(),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                    ),
+                    if (!showInlineSettings)
                       Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        height: 24,
-                        child: IgnorePointer(
-                          child: ColoredBox(
-                            key: const ValueKey('footer-bottom-background'),
-                            color: _canvas,
+                        right: 18,
+                        bottom: 14,
+                        child: Material(
+                          color: _surfaceRaised,
+                          shape: const CircleBorder(),
+                          elevation: 3,
+                          child: IconButton(
+                            tooltip: appText('Settings'),
+                            onPressed: _openSettings,
+                            icon: const Icon(LucideIcons300.settings),
+                            color: _muted,
                           ),
                         ),
                       ),
+                    if (_saraCameraActive)
+                      Positioned(
+                        top: 10,
+                        left: 0,
+                        right: 0,
+                        child: Center(
+                          child: Material(
+                            key: const ValueKey('sara-camera-active-indicator'),
+                            color: const Color(0xF02B303A),
+                            borderRadius: BorderRadius.circular(20),
+                            child: Padding(
+                              padding: const EdgeInsets.only(
+                                left: 12,
+                                right: 4,
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    LucideIcons300.video,
+                                    size: 17,
+                                    color: Color(0xFFFF8585),
+                                  ),
+                                  const SizedBox(width: 7),
+                                  Text(
+                                    appText(
+                                      'Sara is looking through the camera',
+                                    ),
+                                    style: const TextStyle(
+                                      color: _text,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 5),
+                                  IconButton(
+                                    key: const ValueKey('stop-sara-camera'),
+                                    tooltip: appText('Stop camera access'),
+                                    onPressed: _stopCameraFromIndicator,
+                                    icon: const Icon(LucideIcons300.x),
+                                    color: _muted,
+                                    iconSize: 16,
+                                    visualDensity: VisualDensity.compact,
+                                    constraints: const BoxConstraints.tightFor(
+                                      width: 28,
+                                      height: 28,
+                                    ),
+                                    padding: EdgeInsets.zero,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (_isDraggingFiles)
                       Positioned.fill(
-                        child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            final panelWidth = constraints.maxWidth < 800
-                                ? constraints.maxWidth * 0.42
-                                : 390.0;
-                            return Row(
-                              children: [
-                                Expanded(
-                                  child: Column(
+                        child: IgnorePointer(
+                          child: Container(
+                            margin: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: const Color(0x332D5798),
+                              border: Border.all(color: _accent, width: 2),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Center(
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: _surfaceRaised,
+                                  borderRadius: BorderRadius.all(
+                                    Radius.circular(14),
+                                  ),
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 20,
+                                    vertical: 14,
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      Expanded(
-                                        child: _isLoadingHistory
-                                            ? const Center(
-                                                child:
-                                                    CircularProgressIndicator(),
-                                              )
-                                            : visibleMessages.isEmpty
-                                            ? const _WelcomeView()
-                                            : ListenableBuilder(
-                                                listenable: Listenable.merge([
-                                                  _speechPlaybackController
-                                                      .speakingMessageId,
-                                                  _speechPlaybackController
-                                                      .loadingMessageId,
-                                                ]),
-                                                builder: (context, _) => _ConversationView(
-                                                  messages: visibleMessages,
-                                                  scrollController:
-                                                      _scrollController,
-                                                  isSending: _isSending,
-                                                  showReplyIndicator:
-                                                      _isSending &&
-                                                      !_hasStreamedReply,
-                                                  retryErrors: _retryErrors,
-                                                  onRetryMessage: _retryMessage,
-                                                  onDeleteMessage:
-                                                      _deleteMessageAndFollowing,
-                                                  onEditMessage:
-                                                      _submitEditedMessage,
-                                                  onProactiveModeChanged:
-                                                      _recordConversationProactiveMode,
-                                                  messageBranches:
-                                                      _messageBranches,
-                                                  onActivateBranch:
-                                                      _activateMessageBranch,
-                                                  onRegenerateMessage:
-                                                      _regenerateMessage,
-                                                  attachmentsByMessage:
-                                                      _attachmentsByMessage,
-                                                  terminalActivitiesByResponse:
-                                                      _terminalActivitiesByResponse,
-                                                  activeReplyResponseMessageId:
-                                                      _activeReplyResponseMessageId,
-                                                  assistantFeedback:
-                                                      _assistantFeedback,
-                                                  onSetAssistantFeedback:
-                                                      _setAssistantFeedback,
-                                                  assistantReactions:
-                                                      _assistantReactions,
-                                                  onSetAssistantReaction:
-                                                      _setAssistantReaction,
-                                                  speakingMessageId:
-                                                      _speechPlaybackController
-                                                          .speakingMessageId
-                                                          .value,
-                                                  loadingSpeechMessageId:
-                                                      _speechPlaybackController
-                                                          .loadingMessageId
-                                                          .value,
-                                                  onToggleSpeech: _toggleSpeech,
-                                                  showScrollToBottom:
-                                                      _showScrollToBottom,
-                                                  onScrollToBottom:
-                                                      _scrollToLatest,
-                                                  onScrollMetricsChanged:
-                                                      _handleScroll,
-                                                  onUserScroll:
-                                                      _handleUserScroll,
-                                                  onShowSearchResults:
-                                                      (
-                                                        messageId,
-                                                      ) => setState(() {
-                                                        _searchResultsMessageId =
-                                                            messageId;
-                                                      }),
-                                                ),
-                                              ),
+                                      const Icon(
+                                        LucideIcons300.upload,
+                                        color: _accent,
                                       ),
-                                      ConstrainedBox(
-                                        constraints: BoxConstraints(
-                                          maxHeight: constraints.maxHeight,
+                                      const SizedBox(width: 10),
+                                      Text(
+                                        appText(
+                                          'Drop files or media here to attach',
                                         ),
-                                        child: _Composer(
-                                          key: _composerKey,
-                                          controller: _messageController,
-                                          focusNode: _messageFocus,
-                                          onSend: _sendMessage,
-                                          onModeChanged:
-                                              _recordConversationProactiveMode,
-                                          isWaitingForReply:
-                                              _isSending && !_hasStreamedReply,
-                                          showInlineSettings:
-                                              showInlineSettings,
-                                          onOpenSettings: _openSettings,
-                                          clipboardImageReader:
-                                              widget.clipboardImageReader,
-                                          clipboardImageSaver:
-                                              widget.clipboardImageSaver,
-                                          cameraSessionFactory:
-                                              widget.cameraSessionFactory,
-                                          cameraImageSaver:
-                                              widget.cameraImageSaver,
-                                          pendingTerminalCommandApproval:
-                                              _pendingTerminalCommandApproval,
-                                          terminalCommandActivity:
-                                              _terminalCommandActivity,
-                                          terminalCommandOutput: [
-                                            if (_terminalCommandStdout
-                                                .isNotEmpty)
-                                              _terminalCommandStdout,
-                                            if (_terminalCommandStderr
-                                                .isNotEmpty)
-                                              'stderr:\n$_terminalCommandStderr',
-                                          ].join('\n'),
-                                          terminalCommandRunning:
-                                              _terminalCommandRunning,
-                                          terminalCommandAutomaticallyAllowed:
-                                              _terminalCommandAutomaticallyAllowed,
-                                          onTerminalCommandDecision:
-                                              _decideTerminalCommand,
-                                          onStopTerminalCommand:
-                                              _stopTerminalCommand,
+                                        style: const TextStyle(
+                                          color: _text,
+                                          fontSize: 13,
                                         ),
                                       ),
                                     ],
                                   ),
                                 ),
-                                AnimatedContainer(
-                                  duration: const Duration(milliseconds: 220),
-                                  curve: Curves.easeInOut,
-                                  width: showSearchResultsPanel
-                                      ? panelWidth
-                                      : 0,
-                                  child: showSearchResultsPanel
-                                      ? _SearchResultsPanel(
-                                          sources: selectedSearchSources,
-                                          messageDate: selectedSearchDate,
-                                          onClose: () => setState(
-                                            () =>
-                                                _searchResultsMessageId = null,
-                                          ),
-                                          onOpen: _openSearchResultLink,
-                                        )
-                                      : const SizedBox.shrink(),
-                                ),
-                              ],
-                            );
-                          },
+                              ),
+                            ),
+                          ),
                         ),
                       ),
-                      if (!showInlineSettings)
-                        Positioned(
-                          right: 18,
-                          bottom: 14,
-                          child: Material(
-                            color: _surfaceRaised,
-                            shape: const CircleBorder(),
-                            elevation: 3,
-                            child: IconButton(
-                              tooltip: appText('Settings'),
-                              onPressed: _openSettings,
-                              icon: const Icon(LucideIcons300.settings),
-                              color: _muted,
-                            ),
-                          ),
-                        ),
-                      if (_saraCameraActive)
-                        Positioned(
-                          top: 10,
-                          left: 0,
-                          right: 0,
-                          child: Center(
-                            child: Material(
-                              key: const ValueKey(
-                                'sara-camera-active-indicator',
-                              ),
-                              color: const Color(0xF02B303A),
-                              borderRadius: BorderRadius.circular(20),
-                              child: Padding(
-                                padding: const EdgeInsets.only(
-                                  left: 12,
-                                  right: 4,
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(
-                                      LucideIcons300.video,
-                                      size: 17,
-                                      color: Color(0xFFFF8585),
-                                    ),
-                                    const SizedBox(width: 7),
-                                    Text(
-                                      appText(
-                                        'Sara is looking through the camera',
-                                      ),
-                                      style: const TextStyle(
-                                        color: _text,
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 5),
-                                    IconButton(
-                                      key: const ValueKey('stop-sara-camera'),
-                                      tooltip: appText('Stop camera access'),
-                                      onPressed: _stopCameraFromIndicator,
-                                      icon: const Icon(LucideIcons300.x),
-                                      color: _muted,
-                                      iconSize: 16,
-                                      visualDensity: VisualDensity.compact,
-                                      constraints:
-                                          const BoxConstraints.tightFor(
-                                            width: 28,
-                                            height: 28,
-                                          ),
-                                      padding: EdgeInsets.zero,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      if (_isDraggingFiles)
-                        Positioned.fill(
-                          child: IgnorePointer(
-                            child: Container(
-                              margin: const EdgeInsets.all(14),
-                              decoration: BoxDecoration(
-                                color: const Color(0x332D5798),
-                                border: Border.all(color: _accent, width: 2),
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: Center(
-                                child: DecoratedBox(
-                                  decoration: BoxDecoration(
-                                    color: _surfaceRaised,
-                                    borderRadius: BorderRadius.all(
-                                      Radius.circular(14),
-                                    ),
-                                  ),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 20,
-                                      vertical: 14,
-                                    ),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const Icon(
-                                          LucideIcons300.upload,
-                                          color: _accent,
-                                        ),
-                                        const SizedBox(width: 10),
-                                        Text(
-                                          appText(
-                                            'Drop files or media here to attach',
-                                          ),
-                                          style: const TextStyle(
-                                            color: _text,
-                                            fontSize: 13,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
+                  ],
                 ),
               ),
             ),
@@ -5354,7 +5508,7 @@ List<_SearchResultSource> _searchResultSources(String content) {
 }
 
 List<_SearchResultSource> _messageResultSources(String content) {
-  final sources = _searchResultSources(content);
+  final sources = _searchResultSources(content).toList(growable: true);
   final sourceUrls = {for (final source in sources) source.uri.toString()};
   final linkTitles = <String, String>{};
   final markdownLinks = RegExp(
@@ -5434,6 +5588,8 @@ String _messageContentWithoutSearchSources(String content) {
 class _ConversationView extends StatelessWidget {
   const _ConversationView({
     required this.messages,
+    required this.linkPreviewService,
+    required this.onOpenLink,
     required this.scrollController,
     required this.isSending,
     required this.showReplyIndicator,
@@ -5460,9 +5616,13 @@ class _ConversationView extends StatelessWidget {
     required this.onScrollMetricsChanged,
     required this.onUserScroll,
     required this.onShowSearchResults,
+    required this.onAnswerClarification,
+    required this.onSubmitClarification,
   });
 
   final List<ChatMessage> messages;
+  final LinkPreviewService linkPreviewService;
+  final Future<void> Function(String href) onOpenLink;
   final ScrollController scrollController;
   final bool isSending;
   final bool showReplyIndicator;
@@ -5506,6 +5666,13 @@ class _ConversationView extends StatelessWidget {
   final VoidCallback onScrollMetricsChanged;
   final VoidCallback onUserScroll;
   final ValueChanged<String> onShowSearchResults;
+  final Future<bool> Function(
+    String messageId,
+    int questionIndex,
+    String answer,
+  )
+  onAnswerClarification;
+  final ValueChanged<String> onSubmitClarification;
 
   @override
   Widget build(BuildContext context) {
@@ -5551,6 +5718,13 @@ class _ConversationView extends StatelessWidget {
                         );
                       }
                       final message = messages[index];
+                      final clarificationAnswer =
+                          message.clarification != null &&
+                              index + 1 < messages.length &&
+                              messages[index + 1].role == 'user' &&
+                              messages[index + 1].parentMessageId == message.id
+                          ? messages[index + 1].content
+                          : null;
                       final feedbackUserMessageId = _previousUserMessageId(
                         index,
                       );
@@ -5569,6 +5743,13 @@ class _ConversationView extends StatelessWidget {
                             child: _MessageRow(
                               key: ValueKey(message.id),
                               message: message,
+                              linkPreviewService: linkPreviewService,
+                              onOpenLink: onOpenLink,
+                              clarificationAnswer: clarificationAnswer,
+                              clarificationEnabled:
+                                  !isSending && clarificationAnswer == null,
+                              onAnswerClarification: onAnswerClarification,
+                              onSubmitClarification: onSubmitClarification,
                               retryError: retryErrors[message.id],
                               onRetry: () => onRetryMessage(message.id),
                               retryEnabled: !isSending,
@@ -6159,6 +6340,12 @@ class _MessageRow extends StatefulWidget {
   const _MessageRow({
     super.key,
     required this.message,
+    required this.linkPreviewService,
+    required this.onOpenLink,
+    required this.clarificationAnswer,
+    required this.clarificationEnabled,
+    required this.onAnswerClarification,
+    required this.onSubmitClarification,
     required this.retryError,
     required this.onRetry,
     required this.retryEnabled,
@@ -6188,6 +6375,17 @@ class _MessageRow extends StatefulWidget {
   });
 
   final ChatMessage message;
+  final LinkPreviewService linkPreviewService;
+  final Future<void> Function(String href) onOpenLink;
+  final String? clarificationAnswer;
+  final bool clarificationEnabled;
+  final Future<bool> Function(
+    String messageId,
+    int questionIndex,
+    String answer,
+  )
+  onAnswerClarification;
+  final ValueChanged<String> onSubmitClarification;
   final String? retryError;
   final VoidCallback onRetry;
   final bool retryEnabled;
@@ -6245,7 +6443,6 @@ class _MessageRowState extends State<_MessageRow> {
   final _editController = _EmojiAwareTextEditingController();
   final List<ChatAttachment> _editAttachments = [];
   final Map<String, Future<LinkPreview?>> _linkPreviews = {};
-  final _linkPreviewService = LinkPreviewService();
   Timer? _copyResetTimer;
 
   @override
@@ -6604,14 +6801,14 @@ class _MessageRowState extends State<_MessageRow> {
                                   ),
                                   decoration: BoxDecoration(
                                     color: _isHovered
-                                        ? const Color(0xFF2B313D)
-                                        : const Color(0xFF252A34),
+                                        ? const Color(0xFF454545)
+                                        : const Color(0xFF353535),
                                     border: Border.all(
                                       color: _isEditing
                                           ? _accent
                                           : _isHovered
-                                          ? const Color(0xFF596A86)
-                                          : const Color(0xFF3B4351),
+                                          ? const Color(0xFF666666)
+                                          : const Color(0xFF555555),
                                     ),
                                     borderRadius: BorderRadius.circular(17),
                                   ),
@@ -6939,7 +7136,18 @@ class _MessageRowState extends State<_MessageRow> {
               ),
               const SizedBox(height: 8),
             ],
-            if (message.content.trim().isNotEmpty)
+            if (message.clarification != null)
+              _ClarificationCard(
+                key: ValueKey('clarification-card-${message.id}'),
+                clarification: message.clarification!,
+                answer: widget.clarificationAnswer,
+                enabled: widget.clarificationEnabled,
+                onAnswer: (questionIndex, answer) => widget
+                    .onAnswerClarification(message.id, questionIndex, answer),
+                onSubmit: () => widget.onSubmitClarification(message.id),
+              ),
+            if (message.clarification == null &&
+                message.content.trim().isNotEmpty)
               emojiOnlyMessage != null
                   ? _AnimatedEmojiMessage(
                       key: ValueKey('animated-emoji-${message.id}'),
@@ -6965,6 +7173,11 @@ class _MessageRowState extends State<_MessageRow> {
                               color: _text,
                               fontSize: 14,
                               height: 1.75,
+                            ),
+                            horizontalRuleDecoration: const BoxDecoration(
+                              border: Border(
+                                top: BorderSide(color: _border, width: 1),
+                              ),
                             ),
                             code: const TextStyle(
                               color: _text,
@@ -7181,35 +7394,75 @@ class _MessageRowState extends State<_MessageRow> {
   }
 
   List<Widget> _buildLinkPreviews(String content) {
-    final links = _messageWebUris(content).take(5);
+    final links = _messageWebUris(content).take(5).toList();
     return [
-      for (final uri in links)
-        FutureBuilder<LinkPreview?>(
-          key: ValueKey('link-preview-request-$uri'),
-          future: _linkPreviews.putIfAbsent(
-            uri.toString(),
-            () => _linkPreviewService.load(uri),
-          ),
-          builder: (context, snapshot) {
-            if (snapshot.hasError || !snapshot.hasData) {
-              return snapshot.connectionState == ConnectionState.waiting
-                  ? const Padding(
-                      padding: EdgeInsets.only(top: 10),
-                      child: SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 1.5),
-                      ),
-                    )
-                  : const SizedBox.shrink();
-            }
-            final preview = snapshot.data!;
-            return _LinkPreviewCard(
-              key: ValueKey(preview.uri.toString()),
-              preview: preview,
-            );
-          },
-        ),
+      LayoutBuilder(
+        builder: (context, constraints) {
+          const spacing = 12.0;
+          final columnCount = links.length == 1 || constraints.maxWidth < 500
+              ? 1
+              : 2;
+          final itemWidth =
+              (constraints.maxWidth - spacing * (columnCount - 1)) /
+              columnCount;
+          return Wrap(
+            key: ValueKey('link-preview-grid-${widget.message.id}'),
+            spacing: spacing,
+            runSpacing: spacing,
+            children: [
+              for (final uri in links)
+                SizedBox(
+                  key: ValueKey('link-preview-grid-item-$uri'),
+                  width: itemWidth,
+                  child: FutureBuilder<LinkPreview?>(
+                    key: ValueKey('link-preview-request-$uri'),
+                    future: _linkPreviews.putIfAbsent(
+                      uri.toString(),
+                      () => widget.linkPreviewService.load(uri),
+                    ),
+                    builder: (context, snapshot) {
+                      final isLoading =
+                          snapshot.connectionState == ConnectionState.waiting;
+                      final preview =
+                          snapshot.data ??
+                          LinkPreview(
+                            uri: uri,
+                            title: uri.host,
+                            description: uri.toString(),
+                          );
+                      final onTap = () =>
+                          unawaited(widget.onOpenLink(uri.toString()));
+                      return AnimatedSize(
+                        key: ValueKey('link-preview-layout-$uri'),
+                        alignment: Alignment.topLeft,
+                        duration: const Duration(milliseconds: 320),
+                        curve: Curves.easeInOutCubic,
+                        child: AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 260),
+                          switchInCurve: Curves.easeOutCubic,
+                          switchOutCurve: Curves.easeInCubic,
+                          transitionBuilder: (child, animation) =>
+                              FadeTransition(opacity: animation, child: child),
+                          child: isLoading
+                              ? _LinkPreviewLoadingCard(
+                                  key: ValueKey('loading-$uri'),
+                                  uri: uri,
+                                  onTap: onTap,
+                                )
+                              : _LinkPreviewCard(
+                                  key: ValueKey('preview-$uri'),
+                                  preview: preview,
+                                  onTap: onTap,
+                                ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+            ],
+          );
+        },
+      ),
     ];
   }
 
@@ -7772,10 +8025,397 @@ String _normalizeCodeLanguage(String? language) {
   return aliases[normalized] ?? normalized;
 }
 
+class _ClarificationCard extends StatefulWidget {
+  const _ClarificationCard({
+    super.key,
+    required this.clarification,
+    required this.answer,
+    required this.enabled,
+    required this.onAnswer,
+    required this.onSubmit,
+  });
+
+  final ClarificationPrompt clarification;
+  final String? answer;
+  final bool enabled;
+  final Future<bool> Function(int questionIndex, String answer) onAnswer;
+  final VoidCallback onSubmit;
+
+  @override
+  State<_ClarificationCard> createState() => _ClarificationCardState();
+}
+
+class _ClarificationCardState extends State<_ClarificationCard> {
+  final _answerController = TextEditingController();
+  late int _activeQuestionIndex;
+  bool _isSubmitting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _activeQuestionIndex = _initialQuestionIndex(widget.clarification);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ClarificationCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(widget.clarification, oldWidget.clarification)) {
+      _activeQuestionIndex = _initialQuestionIndex(widget.clarification);
+    }
+  }
+
+  @override
+  void dispose() {
+    _answerController.dispose();
+    super.dispose();
+  }
+
+  int _initialQuestionIndex(ClarificationPrompt clarification) {
+    if (clarification.isComplete) return clarification.questions.length - 1;
+    for (var index = 0; index < clarification.questions.length; index++) {
+      if (clarification.answerAt(index) == null) return index;
+    }
+    return 0;
+  }
+
+  Future<void> _submitAnswer(String answer) async {
+    if (!widget.enabled || _isSubmitting || answer.trim().isEmpty) return;
+    final questionIndex = _activeQuestionIndex;
+    setState(() => _isSubmitting = true);
+    try {
+      final saved = await widget.onAnswer(questionIndex, answer);
+      if (!mounted) return;
+      setState(() {
+        _isSubmitting = false;
+        if (saved &&
+            questionIndex < widget.clarification.questions.length - 1) {
+          _activeQuestionIndex = questionIndex + 1;
+        }
+        if (saved) _answerController.clear();
+      });
+    } finally {
+      if (mounted && _isSubmitting) {
+        setState(() => _isSubmitting = false);
+      }
+    }
+  }
+
+  void _showQuestion(int index) {
+    setState(() => _activeQuestionIndex = index);
+    _answerController.clear();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final clarification = widget.clarification;
+    final activeQuestion = clarification.questions[_activeQuestionIndex];
+    final savedAnswer = clarification.answerAt(_activeQuestionIndex);
+    final answer =
+        savedAnswer ?? (_activeQuestionIndex == 0 ? widget.answer : null);
+    final canAnswer = widget.enabled && !_isSubmitting && answer == null;
+    final hasMultipleQuestions = clarification.questions.length > 1;
+
+    return Container(
+      key: const ValueKey('clarification-card'),
+      width: double.infinity,
+      margin: const EdgeInsets.only(top: 6, bottom: 6),
+      padding: const EdgeInsets.fromLTRB(12, 9, 12, 6),
+      decoration: BoxDecoration(
+        color: _surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            activeQuestion.question,
+            key: const ValueKey('clarification-question'),
+            style: const TextStyle(
+              color: _text,
+              fontSize: 15,
+              height: 1.35,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          if (answer != null) ...[
+            const SizedBox(height: 6),
+            Container(
+              key: ValueKey('clarification-answer-$_activeQuestionIndex'),
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+              decoration: BoxDecoration(
+                color: _surfaceRaised,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                appText('Your answer: {answer}', values: {'answer': answer}),
+                style: const TextStyle(
+                  color: _text,
+                  fontSize: 12,
+                  height: 1.35,
+                ),
+              ),
+            ),
+          ] else if (canAnswer) ...[
+            const SizedBox(height: 4),
+            for (var index = 0; index < activeQuestion.options.length; index++)
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      key: ValueKey('clarification-option-$index'),
+                      onTap: () => unawaited(
+                        _submitAnswer(activeQuestion.options[index]),
+                      ),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 2,
+                            vertical: 7,
+                          ),
+                          child: Text(
+                            activeQuestion.options[index],
+                            style: const TextStyle(
+                              color: _text,
+                              fontSize: 12,
+                              height: 1.3,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (index < activeQuestion.options.length - 1)
+                    Divider(height: 1, thickness: 0.5, color: _border),
+                ],
+              ),
+            const SizedBox(height: 4),
+            TextField(
+              key: const ValueKey('clarification-other-answer'),
+              controller: _answerController,
+              enabled: canAnswer,
+              maxLines: 1,
+              textCapitalization: TextCapitalization.sentences,
+              textInputAction: TextInputAction.send,
+              onSubmitted: (value) => unawaited(_submitAnswer(value)),
+              style: const TextStyle(color: _text, fontSize: 13),
+              decoration: InputDecoration(
+                hintText: appText('Type another answer'),
+                hintStyle: const TextStyle(color: _muted, fontSize: 12),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 1,
+                  vertical: 7,
+                ),
+                border: UnderlineInputBorder(
+                  borderSide: BorderSide(color: _border),
+                ),
+                enabledBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(color: _border),
+                ),
+                focusedBorder: const UnderlineInputBorder(
+                  borderSide: BorderSide(color: _muted),
+                ),
+                disabledBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(color: _border),
+                ),
+              ),
+            ),
+          ],
+          if (hasMultipleQuestions) ...[
+            const SizedBox(height: 2),
+            Row(
+              children: [
+                TextButton.icon(
+                  key: const ValueKey('clarification-previous'),
+                  onPressed: _activeQuestionIndex == 0
+                      ? null
+                      : () => _showQuestion(_activeQuestionIndex - 1),
+                  style: TextButton.styleFrom(
+                    foregroundColor: _text,
+                    minimumSize: const Size(0, 30),
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  icon: const Icon(Icons.chevron_left, size: 18),
+                  label: Text(appText('Previous question')),
+                ),
+                const Spacer(),
+                TextButton(
+                  key: const ValueKey('clarification-next'),
+                  onPressed:
+                      _activeQuestionIndex >=
+                              clarification.questions.length - 1 ||
+                          answer == null
+                      ? null
+                      : () => _showQuestion(_activeQuestionIndex + 1),
+                  style: TextButton.styleFrom(
+                    foregroundColor: _text,
+                    minimumSize: const Size(0, 30),
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(appText('Next question')),
+                      const SizedBox(width: 2),
+                      const Icon(Icons.chevron_right, size: 18),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+          if (clarification.isComplete && widget.answer == null) ...[
+            const SizedBox(height: 2),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                key: const ValueKey('clarification-submit-answers'),
+                onPressed: widget.enabled ? widget.onSubmit : null,
+                child: Text(appText('Send answers')),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _LinkPreviewLoadingCard extends StatefulWidget {
+  const _LinkPreviewLoadingCard({
+    super.key,
+    required this.uri,
+    required this.onTap,
+  });
+
+  final Uri uri;
+  final VoidCallback onTap;
+
+  @override
+  State<_LinkPreviewLoadingCard> createState() =>
+      _LinkPreviewLoadingCardState();
+}
+
+class _LinkPreviewLoadingCardState extends State<_LinkPreviewLoadingCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _shimmer = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1250),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _shimmer.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: MouseRegion(
+        key: ValueKey('link-preview-loading-card-${widget.uri}'),
+        cursor: SystemMouseCursors.click,
+        child: Semantics(
+          link: true,
+          label: widget.uri.toString(),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: widget.onTap,
+              borderRadius: BorderRadius.circular(12),
+              child: Ink(
+                height: 156,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: _surface,
+                  border: Border.all(color: _border),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Stack(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _skeletonLine(0.18, 9),
+                          const SizedBox(height: 14),
+                          _skeletonLine(0.65, 15),
+                          const SizedBox(height: 10),
+                          _skeletonLine(1, 9),
+                          const SizedBox(height: 7),
+                          _skeletonLine(0.78, 9),
+                        ],
+                      ),
+                    ),
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: AnimatedBuilder(
+                          animation: _shimmer,
+                          builder: (context, _) => Align(
+                            alignment: Alignment(-1.5 + _shimmer.value * 3, 0),
+                            child: FractionallySizedBox(
+                              widthFactor: 0.35,
+                              heightFactor: 1,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: [
+                                      Colors.transparent,
+                                      Colors.white.withValues(alpha: 0.055),
+                                      Colors.transparent,
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _skeletonLine(double widthFactor, double height) =>
+      FractionallySizedBox(
+        widthFactor: widthFactor,
+        alignment: Alignment.centerLeft,
+        child: Container(
+          width: double.infinity,
+          height: height,
+          decoration: BoxDecoration(
+            color: _surfaceRaised,
+            borderRadius: BorderRadius.circular(4),
+          ),
+        ),
+      );
+}
+
 class _LinkPreviewCard extends StatefulWidget {
-  const _LinkPreviewCard({super.key, required this.preview});
+  const _LinkPreviewCard({
+    super.key,
+    required this.preview,
+    required this.onTap,
+  });
 
   final LinkPreview preview;
+  final VoidCallback onTap;
 
   @override
   State<_LinkPreviewCard> createState() => _LinkPreviewCardState();
@@ -7857,43 +8497,71 @@ class _LinkPreviewCardState extends State<_LinkPreviewCard> {
         alignment: Alignment.centerLeft,
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 580),
-          child: Container(
-            width: double.infinity,
-            margin: const EdgeInsets.only(top: 10),
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: _surface,
-              borderRadius: BorderRadius.circular(11),
-              border: Border.all(color: _border),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  preview.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: _text,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if (preview.description case final description?) ...[
-                  const SizedBox(height: 5),
-                  Text(
-                    description,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: _muted,
-                      fontSize: 12,
-                      height: 1.4,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: MouseRegion(
+              key: ValueKey('link-preview-card-${preview.uri}'),
+              cursor: SystemMouseCursors.click,
+              child: Semantics(
+                link: true,
+                label: preview.uri.toString(),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: widget.onTap,
+                    borderRadius: BorderRadius.circular(11),
+                    child: Ink(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: _surface,
+                        borderRadius: BorderRadius.circular(11),
+                        border: Border.all(color: _border),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            preview.uri.host,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: _muted,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            preview.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: _text,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          if (preview.description case final description?) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              description,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: _muted,
+                                fontSize: 12,
+                                height: 1.4,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
                     ),
                   ),
-                ],
-              ],
+                ),
+              ),
             ),
           ),
         ),
@@ -7907,67 +8575,85 @@ class _LinkPreviewCardState extends State<_LinkPreviewCard> {
           final height = (width / _mediaAspectRatio)
               .clamp(240.0, 315.0)
               .toDouble();
-          return Container(
-            key: const ValueKey('link-preview-rich-card'),
-            width: width,
-            height: height,
-            margin: const EdgeInsets.only(top: 10),
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              color: const Color(0xFF1D2129),
-              border: Border.all(color: _border),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Stack(
-              alignment: Alignment.bottomLeft,
-              children: [
-                Positioned.fill(child: _buildMedia()),
-                Positioned.fill(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [
-                          Colors.transparent,
-                          Colors.black.withValues(alpha: 0.78),
+          return Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: MouseRegion(
+              key: ValueKey('link-preview-card-${preview.uri}'),
+              cursor: SystemMouseCursors.click,
+              child: Semantics(
+                link: true,
+                label: preview.uri.toString(),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: widget.onTap,
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      key: const ValueKey('link-preview-rich-card'),
+                      width: width,
+                      height: height,
+                      clipBehavior: Clip.antiAlias,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1D2129),
+                        border: Border.all(color: _border),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Stack(
+                        alignment: Alignment.bottomLeft,
+                        children: [
+                          Positioned.fill(child: _buildMedia()),
+                          Positioned.fill(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Colors.transparent,
+                                    Colors.black.withValues(alpha: 0.78),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  preview.title,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                if (preview.description
+                                    case final description?) ...[
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    description,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
                         ],
                       ),
                     ),
                   ),
                 ),
-                Padding(
-                  padding: const EdgeInsets.all(14),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        preview.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      if (preview.description case final description?) ...[
-                        const SizedBox(height: 4),
-                        Text(
-                          description,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ],
+              ),
             ),
           );
         },
@@ -8634,12 +9320,7 @@ class _ComposerState extends State<_Composer> {
         final canSubmit =
             widget.controller.text.trim().isNotEmpty || _attachments.isNotEmpty;
         return Padding(
-          padding: EdgeInsets.fromLTRB(
-            24,
-            compact ? 4 : 10,
-            24,
-            compact ? 6 : 14,
-          ),
+          padding: EdgeInsets.fromLTRB(24, 0, 24, compact ? 6 : 14),
           child: Center(
             heightFactor: 1,
             child: ConstrainedBox(

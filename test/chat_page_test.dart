@@ -20,6 +20,7 @@ import 'package:sara_desktop/camera_capture.dart';
 import 'package:sara_desktop/camera_capture_cache.dart';
 import 'package:sara_desktop/desktop_notification_service.dart';
 import 'package:sara_desktop/gemini_reply_service.dart';
+import 'package:sara_desktop/link_preview_service.dart';
 import 'package:sara_desktop/main.dart';
 import 'package:sara_desktop/message_database.dart';
 import 'package:sara_desktop/smart_text_input_formatter.dart';
@@ -163,6 +164,323 @@ void main() {
     expect(
       find.byKey(const ValueKey('link-preview-request-https://:443/invalid')),
       findsNothing,
+    );
+  });
+
+  testWidgets('model replies with regular links render without source lists', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final messageStore = _MemoryMessageStore()
+      ..messages.add(
+        const ChatMessage(
+          id: 'regular-link-reply',
+          role: 'model',
+          content: 'Here is the [job listing](https://localhost/job).',
+          timestamp: '2026-11-06 22:00:00',
+          createdAtUtc: 1793973600000,
+        ),
+      );
+    await tester.pumpWidget(
+      _testApp(messageStore: messageStore, replyService: _FakeReplyService()),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(
+        const ValueKey('assistant-message-content-regular-link-reply'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('link-preview-grid-regular-link-reply')),
+      findsOneWidget,
+    );
+    final gridItem = find.byKey(
+      const ValueKey('link-preview-grid-item-https://localhost/job'),
+    );
+    expect(gridItem, findsOneWidget);
+    expect(tester.getSize(gridItem).width, greaterThan(500));
+  });
+
+  testWidgets('single URL preview keeps its card while loading and opens', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const url = 'https://preview.example/page';
+    final service = _PendingLinkPreviewService();
+    final openedUrls = <Uri>[];
+    final messageStore = _MemoryMessageStore()
+      ..messages.add(
+        const ChatMessage(
+          id: 'loading-link-preview',
+          role: 'model',
+          content: 'https://preview.example/page',
+          timestamp: 'today',
+          createdAtUtc: 1,
+        ),
+      );
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: messageStore,
+        replyService: _FakeReplyService(),
+        linkPreviewService: service,
+        openExternalLink: (uri) async => openedUrls.add(uri),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final loadingCard = find.byKey(
+      const ValueKey('link-preview-loading-card-$url'),
+    );
+    expect(loadingCard, findsOneWidget);
+    final loadingSize = tester.getSize(loadingCard);
+    expect(loadingSize.height, greaterThan(140));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(loadingCard, findsOneWidget);
+
+    service.completer.complete(
+      LinkPreview(
+        uri: Uri.parse(url),
+        title: 'Preview title',
+        description: 'Preview description',
+      ),
+    );
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    final previewCard = find.byKey(const ValueKey('link-preview-card-$url'));
+    expect(previewCard, findsOneWidget);
+    expect(tester.getSize(previewCard).height, lessThan(loadingSize.height));
+    expect(tester.getSize(previewCard).height, lessThan(110));
+    await tester.tap(previewCard);
+    await tester.pumpAndSettle();
+    expect(openedUrls, [Uri.parse(url)]);
+  });
+
+  testWidgets('Markdown horizontal rules use the subdued chat divider style', (
+    tester,
+  ) async {
+    final messageStore = _MemoryMessageStore()
+      ..messages.add(
+        const ChatMessage(
+          id: 'horizontal-rule-reply',
+          role: 'model',
+          content: 'Before\n\n***\n\nAfter',
+          timestamp: '2026-11-06 22:00:00',
+          createdAtUtc: 1793973600000,
+        ),
+      );
+    await tester.pumpWidget(
+      _testApp(messageStore: messageStore, replyService: _FakeReplyService()),
+    );
+    await tester.pumpAndSettle();
+
+    final body = tester.widget<MarkdownBody>(
+      find.byKey(
+        const ValueKey('assistant-message-content-horizontal-rule-reply'),
+      ),
+    );
+    final decoration =
+        body.styleSheet!.horizontalRuleDecoration! as BoxDecoration;
+    expect((decoration.border! as Border).top.width, 1);
+    expect((decoration.border! as Border).top.color, const Color(0xFF424449));
+  });
+
+  testWidgets('clarification choices send and summarize their answer', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final messageStore = _MemoryMessageStore();
+    final replyService = _FakeReplyService(
+      reply: 'Got it.',
+      clarification: const ClarificationPrompt(
+        questions: [
+          ClarificationQuestion(
+            question: 'Which theme do you prefer?',
+            options: ['Dark theme', 'Light theme'],
+          ),
+        ],
+      ),
+    );
+    await tester.pumpWidget(
+      _testApp(messageStore: messageStore, replyService: replyService),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Help me choose a theme.');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Clarification'), findsNothing);
+    expect(find.text('Which theme do you prefer?'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('clarification-option-0')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('clarification-option-0')));
+    await tester.pumpAndSettle();
+
+    expect(
+      messageStore.messages
+          .lastWhere((message) => message.role == 'user')
+          .content,
+      'Which theme do you prefer?\nDark theme',
+    );
+    expect(find.byKey(const ValueKey('clarification-option-0')), findsNothing);
+    expect(find.text('Your answer: Dark theme'), findsOneWidget);
+    expect(
+      replyService.lastHistory
+          .singleWhere((message) => message.clarification != null)
+          .clarification!
+          .question,
+      'Which theme do you prefer?',
+    );
+  });
+
+  testWidgets('clarification answers advance through stacked questions', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final messageStore = _MemoryMessageStore();
+    final replyService = _FakeReplyService(
+      reply: 'Thanks, that helps.',
+      clarification: const ClarificationPrompt(
+        questions: [
+          ClarificationQuestion(
+            question: 'Which platform do you mean?',
+            options: ['Android', 'iOS'],
+          ),
+          ClarificationQuestion(
+            question: 'Which operating system do you use?',
+            options: ['Linux', 'Windows'],
+          ),
+        ],
+      ),
+    );
+    await tester.pumpWidget(
+      _testApp(messageStore: messageStore, replyService: replyService),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Help me set this up.');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('clarification-progress')), findsNothing);
+    expect(find.text('Which platform do you mean?'), findsOneWidget);
+    expect(
+      tester.getSize(find.byKey(const ValueKey('clarification-card'))).height,
+      lessThan(220),
+    );
+    final firstOption = find.byKey(const ValueKey('clarification-option-0'));
+    expect(firstOption, findsOneWidget);
+    expect(
+      find.ancestor(of: firstOption, matching: find.byType(OutlinedButton)),
+      findsNothing,
+    );
+    await tester.tap(firstOption);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('clarification-progress')), findsNothing);
+    expect(find.text('Which operating system do you use?'), findsOneWidget);
+    expect(
+      messageStore.messages.where((message) => message.role == 'user'),
+      hasLength(1),
+    );
+    final clarificationMessage = messageStore.messages.singleWhere(
+      (message) => message.clarification != null,
+    );
+    expect(clarificationMessage.clarification!.answerAt(0), 'Android');
+    expect(clarificationMessage.clarification!.answerAt(1), isNull);
+
+    await tester.tap(find.byKey(const ValueKey('clarification-previous')));
+    await tester.pumpAndSettle();
+    expect(find.text('Which platform do you mean?'), findsOneWidget);
+    expect(find.text('Your answer: Android'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('clarification-next')));
+    await tester.pumpAndSettle();
+    expect(find.text('Which operating system do you use?'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('clarification-option-0')));
+    await tester.pumpAndSettle();
+
+    final submittedAnswer = messageStore.messages
+        .lastWhere((message) => message.role == 'user')
+        .content;
+    expect(submittedAnswer, contains('Which platform do you mean?\nAndroid'));
+    expect(
+      submittedAnswer,
+      contains('Which operating system do you use?\nLinux'),
+    );
+    final completedClarification = replyService.lastHistory
+        .singleWhere((message) => message.clarification != null)
+        .clarification!;
+    expect(completedClarification.answerAt(0), 'Android');
+    expect(completedClarification.answerAt(1), 'Linux');
+
+    await tester.tap(find.byKey(const ValueKey('clarification-previous')));
+    await tester.pumpAndSettle();
+    expect(find.text('Which platform do you mean?'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('clarification-next')));
+    await tester.pumpAndSettle();
+    expect(find.text('Which operating system do you use?'), findsOneWidget);
+  });
+
+  testWidgets('clarification accepts a custom answer with Enter', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final messageStore = _MemoryMessageStore();
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: messageStore,
+        replyService: _FakeReplyService(
+          reply: 'Got it.',
+          clarification: const ClarificationPrompt(
+            questions: [
+              ClarificationQuestion(
+                question: 'Which theme do you prefer?',
+                options: ['Dark theme', 'Light theme'],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Help me choose a theme.');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    final input = find.byKey(const ValueKey('clarification-other-answer'));
+    await tester.enterText(input, 'Use a blue accent instead.');
+    await tester.testTextInput.receiveAction(TextInputAction.send);
+    await tester.pumpAndSettle();
+
+    expect(
+      messageStore.messages
+          .lastWhere((message) => message.role == 'user')
+          .content,
+      'Which theme do you prefer?\nUse a blue accent instead.',
+    );
+    expect(
+      find.text('Your answer: Use a blue accent instead.'),
+      findsOneWidget,
     );
   });
 
@@ -2140,7 +2458,7 @@ void main() {
     expect(bubble.child, isA<MarkdownBody>());
     expect((bubble.child! as MarkdownBody).data, markdown);
     final decoration = bubble.decoration! as BoxDecoration;
-    expect(decoration.color, const Color(0xFF252A34));
+    expect(decoration.color, const Color(0xFF353535));
     expect(decoration.border, isNotNull);
     expect(
       tester.getSize(find.byKey(const ValueKey('user-message-bubble'))).width,
@@ -2260,6 +2578,7 @@ void main() {
     expect(copiedText, 'Delete from here');
     expect(find.text('Message copied'), findsOneWidget);
     expect(find.byKey(const ValueKey('toast-message')), findsOneWidget);
+    expect(find.byKey(const ValueKey('copy-toast-error')), findsNothing);
     final toastText = tester.widget<Text>(find.text('Message copied'));
     expect(toastText.style?.decoration, TextDecoration.none);
 
@@ -2288,6 +2607,87 @@ void main() {
     expect(find.text('Delete from here'), findsNothing);
     expect(find.text('Remove this reply'), findsNothing);
     expect(find.text('Remove this too'), findsNothing);
+    await mouse.removePointer();
+  });
+
+  testWidgets('error toast copies details and changes its icon to a check', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    var failNextClipboardWrite = true;
+    String? copiedText;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          if (call.method == 'Clipboard.setData') {
+            if (failNextClipboardWrite) {
+              failNextClipboardWrite = false;
+              throw PlatformException(code: 'clipboard_unavailable');
+            }
+            copiedText = (call.arguments as Map)['text'] as String?;
+          }
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+
+    final messageStore = _MemoryMessageStore()
+      ..messages.add(
+        const ChatMessage(
+          id: 'toast-error-user',
+          role: 'user',
+          content: 'Copy this message',
+          timestamp: 'today',
+          createdAtUtc: 1,
+        ),
+      );
+    await tester.pumpWidget(
+      _testApp(messageStore: messageStore, replyService: _FakeReplyService()),
+    );
+    await tester.pumpAndSettle();
+
+    final bubble = find.byKey(const ValueKey('user-message-bubble'));
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.moveTo(tester.getCenter(bubble));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('copy-user-toast-error-user')));
+    await tester.pumpAndSettle();
+
+    final toast = find.byKey(const ValueKey('toast-message'));
+    expect(find.textContaining('Unable to copy message:'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: toast,
+        matching: find.byTooltip('Copy error details'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: toast, matching: find.byIcon(LucideIcons300.copy)),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('copy-toast-error')));
+    await tester.pumpAndSettle();
+
+    expect(copiedText, startsWith('Unable to copy message:'));
+    expect(
+      find.descendant(of: toast, matching: find.byTooltip('Copied')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: toast, matching: find.byIcon(LucideIcons300.check)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: toast, matching: find.byIcon(LucideIcons300.copy)),
+      findsNothing,
+    );
     await mouse.removePointer();
   });
 
@@ -2387,7 +2787,7 @@ void main() {
     await mouse.removePointer();
   });
 
-  testWidgets('composer has a localized dark blur and borderless input', (
+  testWidgets('composer floats over chat canvas with bottom fill', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1280, 800);
@@ -2403,10 +2803,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(
-      Theme.of(tester.element(find.byType(Scaffold))).scaffoldBackgroundColor,
-      const Color(0xFF18191C),
-    );
+    final scaffold = tester.widget<Scaffold>(find.byType(Scaffold));
+    expect(scaffold.backgroundColor, Colors.black);
     expect(
       find.byKey(const ValueKey('footer-bottom-background')),
       findsOneWidget,
@@ -2415,9 +2813,23 @@ void main() {
     final footerRect = tester.getRect(
       find.byKey(const ValueKey('footer-backdrop')),
     );
+    final bottomBackgroundRect = tester.getRect(
+      find.byKey(const ValueKey('footer-bottom-background')),
+    );
     final composerRect = tester.getRect(
       find.byKey(const ValueKey('chat-composer')),
     );
+    final composerSpacing = tester.widget<Padding>(
+      find
+          .ancestor(
+            of: find.byKey(const ValueKey('footer-backdrop')),
+            matching: find.byType(Padding),
+          )
+          .first,
+    );
+    expect(bottomBackgroundRect.top, greaterThanOrEqualTo(footerRect.bottom));
+    expect(bottomBackgroundRect.height, 14);
+    expect(composerSpacing.padding, const EdgeInsets.fromLTRB(24, 0, 24, 14));
     expect(footerRect.width, lessThan(1280));
     expect(footerRect.width, closeTo(composerRect.width, 1));
     expect(footerRect.top, closeTo(composerRect.top, 1));
@@ -4158,6 +4570,8 @@ SaraApp _testApp({
   Future<void> Function(MessageStore messageStore)? cameraCacheCleaner,
   DesktopNotificationService? notificationService,
   Future<void> Function(String assetPath)? notificationSoundPlayer,
+  LinkPreviewService? linkPreviewService,
+  Future<void> Function(Uri uri)? openExternalLink,
 }) {
   return SaraApp(
     configStore: configStore,
@@ -4172,7 +4586,16 @@ SaraApp _testApp({
     notificationService:
         notificationService ?? const DesktopNotificationService(isLinux: false),
     notificationSoundPlayer: notificationSoundPlayer ?? (_) async {},
+    linkPreviewService: linkPreviewService,
+    openExternalLink: openExternalLink,
   );
+}
+
+class _PendingLinkPreviewService extends LinkPreviewService {
+  final completer = Completer<LinkPreview?>();
+
+  @override
+  Future<LinkPreview?> load(Uri uri) => completer.future;
 }
 
 class _FakeSpeechPlaybackController implements SpeechPlaybackController {
@@ -4425,6 +4848,16 @@ class _MemoryMessageStore implements MessageStore {
   @override
   Future<void> saveMessage(ChatMessage message) async {
     messages.add(message);
+  }
+
+  @override
+  Future<void> saveClarificationProgress(
+    String messageId,
+    ClarificationPrompt clarification,
+  ) async {
+    final index = messages.indexWhere((message) => message.id == messageId);
+    if (index < 0) throw StateError('Clarification message is missing.');
+    messages[index] = messages[index].withClarification(clarification);
   }
 
   @override
@@ -4798,12 +5231,14 @@ class _FakeReplyService implements AiReplyService {
     this.reply = 'Hai juga!',
     this.replyGate,
     this.responseAttachments = const [],
+    this.clarification,
   });
 
   Object? error;
   final String reply;
   final Future<String>? replyGate;
   final List<ChatAttachment> responseAttachments;
+  ClarificationPrompt? clarification;
   String? lastPersonalName;
   List<ChatMessage> lastHistory = const [];
   List<ChatMessage> lastPreviousBranchReplies = const [];
@@ -4821,6 +5256,7 @@ class _FakeReplyService implements AiReplyService {
     Map<String, List<ChatAttachment>> attachmentsByMessage = const {},
     void Function(Object error)? onMemoryError,
     void Function(String text)? onText,
+    void Function(ClarificationPrompt clarification)? onClarification,
     void Function(List<ChatAttachment> attachments)? onMedia,
     Future<CameraFrame> Function()? captureCameraFrame,
     TerminalCommandApprovalHandler? approveTerminalCommand,
@@ -4880,6 +5316,11 @@ class _FakeReplyService implements AiReplyService {
           automaticallyAllowed: false,
         );
       }
+    }
+    if (clarification case final prompt?) {
+      clarification = null;
+      onClarification?.call(prompt);
+      return '';
     }
     onText?.call(reply);
     onMedia?.call(responseAttachments);
