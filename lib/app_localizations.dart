@@ -54,6 +54,17 @@ String appText(String english, {Map<String, Object?> values = const {}}) {
 
 const _indonesian = <String, String>{
   'Settings': 'Pengaturan',
+  'About Sara': 'Tentang Sara',
+  'Learn about Sara and get help.': 'Kenali Sara dan dapatkan bantuan.',
+  'A personal AI chat for your desktop.': 'Chat AI personal untuk desktop-mu.',
+  'Sara is powered by Google Gemini and is ready to help with questions, ideas, and everyday conversations.':
+      'Sara didukung Google Gemini dan siap membantu menjawab pertanyaan, mengembangkan ide, dan menemani percakapan sehari-hari.',
+  'Chat history stays on this device, and Gemini API keys are stored in the Linux keyring. Messages and attachments you choose to send are processed by Google Gemini to generate replies.':
+      'Riwayat chat tersimpan di perangkat ini dan API key Gemini disimpan di keyring Linux. Pesan dan lampiran yang kamu pilih untuk dikirim diproses oleh Google Gemini untuk membuat balasan.',
+  'Support & feedback': 'Dukungan & masukan',
+  'Report a problem or get help in the Sara issue tracker.':
+      'Laporkan masalah atau dapatkan bantuan melalui pelacak isu Sara.',
+  'Open GitHub issues': 'Buka isu GitHub',
   'Notifications': 'Notifikasi',
   'Mark all as read': 'Tandai semua sudah dibaca',
   'Delete all notifications': 'Hapus semua notifikasi',

@@ -1,6 +1,6 @@
 <div align="center">
 	<h3><b>Sara</b></h3>
-	<p>Sara adalah aplikasi chat AI desktop (Linux) untuk obrolan pribadi—teman dekat yang siap menemani</p>
+	<p>Sara is a desktop AI chat application for Linux and a close companion for personal conversations.</p>
 </div>
 
 <p align="center">
@@ -8,50 +8,50 @@
     <img src="https://img.shields.io/badge/Download%20app%20-blue?style=for-the-badge" alt="Download app">
   </a>
   <a href="https://github.com/neveerlabs/Sara/releases">
-    <img src="https://img.shields.io/github/v/release/neveerlabs/Sara?include_prereleases&style=for-the-badge&label=versi&color=green" alt="Latest version">
+    <img src="https://img.shields.io/github/v/release/neveerlabs/Sara?include_prereleases&style=for-the-badge&label=version&color=green" alt="Latest version">
   </a>
   <a href="https://github.com/neveerlabs/Sara/blob/main/LICENSE">
     <img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-orange?style=for-the-badge" alt="PolyForm Noncommercial License 1.0.0">
   </a>
 </p>
 
-## Fitur
+## Features
 
-- Chat AI dengan Gemini, data dan percakapan disimpan lokal
-- Lampir media / file, serta pindai barcode dari gambar (image-only)
-- Bacakan pesan (speech), export/import backup data, dan kelola cabang pesan (parrent message)
-- Run commmand linux dengan bash user
-- Melakukan pencarian search web
+- Chat with Gemini; data and conversations are stored locally
+- Attach media and files, and scan barcodes from images (images only)
+- Read messages aloud, export/import data backups, and manage message branches
+- Run Linux commands as the current user
+- Search the web
 
-## Desain UI
+## UI Design
 
 | Room chat | Settings |
 |:---:|:---:|
 | ![Room chat](https://raw.githubusercontent.com/neveerlabs/Sara/main/assets/screenshot/home.png) | ![Settings](https://raw.githubusercontent.com/neveerlabs/Sara/main/assets/screenshot/settings.png) |
 
-## Privasi
+## Privacy
 
-Riwayat disimpan lokal dan API key disimpan di `keyring` Linux. Pesan untuk balasan dan ringkasan dikirim ke Google Gemini; embedding pencarian dibuat lokal. Model embedding sekitar 135 MB diunduh sekali saat pertama kali (diperlukan)
+Conversation history is stored locally, and API keys are stored in the Linux `keyring`. Messages for replies and summaries are sent to Google Gemini; search embeddings are generated locally. The required embedding model (about 135 MB) is downloaded once, when first needed.
 
-## Catatan
+## Notes
 
-* Data lampiran file / media (dari Camera / Clipboard) dihapus otomatis setelah 24 jam
-* API Key disimpan di `keyring` Linux (bukan didatabase)
-* Fitur **Text to Speech** (speech) menggunakan **Sound of Text**
-* Provider yg digunakan hanya **Gemini** dengan model `gemini-3.5-flash-lite`
-* Jika tombol **`Allow camera access`** diaktifkan, AI dapat mengambil gambar dari Kamera device secara otomatis
-* Rating like/dislike dan reaction disimpan ditabel `message`
-* Saat tombol **Vent** aktif, tidak meminta balasan Gemini, tetapi pemikir latar tetap dapat mengirim pesan untuk diringkas. Saat tidak aktif, Gemini boleh membalas atau memilih untuk tidak mengirim balasan
-* Jika terjadi error/kegagalan saat kirim pesan (baik dari Gemini atau di database), maka data pesannya tidak disimpan didatabase (melainkan di cache support sampai pesan tersebut sukses)
-* Regenerate / Edit pesan akan membuat cabang baru untuk pesan tersebut
-* Cabang pesan yg aktif / dibuka disimpan didatabase
-* Hapus pesan user akan menghapus semua cabang dan pesan user tersebut,balasan AI (beserta cabangnya jika ada), dan semua pesan setelahnya
-* Semua token API model Gemini menggunakan user pribadi (bisa set lebih dari satu API Key)
-* Dampak dari AI yg menggunakan tool dapat menjadikan respon balasan lebih lama
-* Format waktu yg digunakan ialah format **Jakarta WIB** (e.g., `Jumat, 13 November 2026, 15:35.`)
-* Provider search web menggunakan Tavily, Tinyfish dan Firecrawl
+* File/media attachments from the camera or clipboard are automatically deleted after 24 hours
+* API keys are stored in the Linux `keyring` (not in the database)
+* **Text to Speech** uses **Sound of Text**
+* The only AI provider is **Gemini**, using the `gemini-3.5-flash-lite` model
+* When **`Allow camera access`** is enabled, the AI can automatically capture images from the device camera
+* Likes, dislikes, and reactions are stored in the `message` table
+* When **Vent** is active, Sara does not request a Gemini reply, but the background thinker can still send messages for summarization. When Vent is inactive, Gemini may reply or choose not to send a reply
+* If sending a message fails (whether due to Gemini or the database), the message is not saved to the database; it remains in the support cache until it can be saved successfully
+* Regenerating or editing a message creates a new branch for that message
+* The active message branch is stored in the database
+* Deleting a user message deletes that message, all its branches and AI replies (including their branches), and all subsequent messages
+* Gemini API keys belong to the user; multiple keys can be configured
+* AI tool use can increase response time
+* Times use **Jakarta Western Indonesian Time (WIB)** (e.g., `Friday, November 13, 2026, 15:35.`)
+* Web search providers are Tavily, TinyFish, and Firecrawl
 
-## Lisensi
+## License
 
 
 Licensed under the [PolyForm Noncommercial License 1.0.0](https://github.com/neveerlabs/Sara/blob/main/LICENSE)

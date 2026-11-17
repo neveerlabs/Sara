@@ -1849,7 +1849,7 @@ void main() {
                     'parts': [
                       {
                         'text':
-                            '{"title":"Topic","summary":"Three exchanges summarized.","intent":"Continue the topic.","open_threads":[],"memories":[{"kind":"habit","key":"plans_with_notes","content":"Often uses notes to plan ideas.","confidence":0.8,"source_message_ids":["batch-user-0","batch-user-2"],"expires_in_days":null},{"kind":"wellbeing","key":"current_state","content":"Had a hard day recently.","confidence":0.7,"source_message_ids":["unknown-id","batch-user-1"],"expires_in_days":14.0}],"resolved_memories":[{"kind":"follow_up","key":"choose_notebook_size"}],"proactive_message":null,"proactive_confidence":0}',
+                            'Summary follows:\n```json\n{"title":"Topic","summary":"Three exchanges summarized.","intent":"Continue the topic.","open_threads":[],"memories":[{"kind":"habit","key":"plans_with_notes","content":"Often uses notes to plan ideas.","confidence":0.8,"source_message_ids":["batch-user-0","batch-user-2"],"expires_in_days":null},{"kind":"wellbeing","key":"current_state","content":"Had a hard day recently.","confidence":0.7,"source_message_ids":["unknown-id","batch-user-1"],"expires_in_days":14.0}],"resolved_memories":[{"kind":"follow_up","key":"choose_notebook_size"}],"proactive_message":null,"proactive_confidence":0}\n```\n',
                       },
                     ],
                   },

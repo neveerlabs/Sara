@@ -1349,7 +1349,7 @@ class ConversationRagService {
         .whereType<String>()
         .join()
         .trim();
-    final decoded = _decodeJsonObject(text);
+    final decoded = _decodeThinkerJsonObject(text);
     final title = decoded['title'];
     final summary = decoded['summary'];
     if (title is! String ||
@@ -1650,24 +1650,85 @@ class ConversationRagService {
   }
 
   static Map<String, dynamic> _decodeJsonObject(String text) {
+    final decoded = _tryDecodeJsonObject(text);
+    if (decoded != null) return decoded;
+    throw const ConversationRagException(
+      'Gemini returned an invalid conversation memory response.',
+    );
+  }
+
+  static Map<String, dynamic> _decodeThinkerJsonObject(String text) {
+    final decoded = _tryDecodeJsonObject(text);
+    if (decoded != null) return decoded;
+
+    final fencedJson = RegExp(
+      r'```(?:json)?\s*([\s\S]*?)\s*```',
+      caseSensitive: false,
+    );
+    for (final match in fencedJson.allMatches(text)) {
+      final fencedObject = _tryDecodeJsonObject(match.group(1)!.trim());
+      if (fencedObject != null) return fencedObject;
+    }
+
+    for (final candidate in _extractJsonObjects(text)) {
+      final object = _tryDecodeJsonObject(candidate);
+      if (object != null) return object;
+    }
+
+    throw const ConversationRagException(
+      'Gemini returned invalid JSON for conversation memory.',
+    );
+  }
+
+  static Map<String, dynamic>? _tryDecodeJsonObject(String text) {
     try {
       final decoded = jsonDecode(text);
       if (decoded is Map<String, dynamic>) return decoded;
     } on FormatException {
-      final unfenced = text
-          .replaceFirst(RegExp(r'^```(?:json)?\s*'), '')
-          .replaceFirst(RegExp(r'\s*```$'), '')
-          .trim();
-      try {
-        final decoded = jsonDecode(unfenced);
-        if (decoded is Map<String, dynamic>) return decoded;
-      } on FormatException {
-        // The caller reports the invalid response with context-specific detail.
+      return null;
+    }
+    return null;
+  }
+
+  static Iterable<String> _extractJsonObjects(String text) sync* {
+    var start = -1;
+    var depth = 0;
+    var insideString = false;
+    var escaped = false;
+
+    for (var index = 0; index < text.length; index++) {
+      final character = text.codeUnitAt(index);
+      if (depth == 0) {
+        if (character == 0x7B) {
+          start = index;
+          depth = 1;
+        }
+        continue;
+      }
+
+      if (insideString) {
+        if (escaped) {
+          escaped = false;
+        } else if (character == 0x5C) {
+          escaped = true;
+        } else if (character == 0x22) {
+          insideString = false;
+        }
+        continue;
+      }
+
+      if (character == 0x22) {
+        insideString = true;
+      } else if (character == 0x7B) {
+        depth++;
+      } else if (character == 0x7D && depth > 0) {
+        depth--;
+        if (depth == 0) {
+          yield text.substring(start, index + 1);
+          start = -1;
+        }
       }
     }
-    throw const ConversationRagException(
-      'Gemini returned invalid JSON for conversation memory.',
-    );
   }
 
   static String _embeddingText(ChatMessage message) {

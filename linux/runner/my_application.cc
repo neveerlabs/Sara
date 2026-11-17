@@ -77,7 +77,7 @@ static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
-  gtk_window_set_title(window, "Sara - Personal AI Chat");
+  gtk_window_set_title(window, "Sara - Anti Politicism");
   gtk_window_set_decorated(window, FALSE);
 
   g_autofree gchar* executable_path = g_file_read_link("/proc/self/exe", nullptr);
@@ -95,6 +95,7 @@ static void my_application_activate(GApplication* application) {
 
   gtk_window_set_default_size(window, 1280, 800);
   gtk_widget_set_size_request(GTK_WIDGET(window), 520, 360);
+  gtk_window_maximize(window);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(

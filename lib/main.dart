@@ -2704,6 +2704,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
           onErrorNotification: (message) => unawaited(
             _notifyWhenUnavailable(message, title: appText('Sara desktop app')),
           ),
+          onOpenLink: _openSearchResultLink,
         ),
       );
     } finally {
@@ -4093,7 +4094,7 @@ class _LinuxWindowTitleBar extends StatefulWidget {
 class _LinuxWindowTitleBarState extends State<_LinuxWindowTitleBar> {
   static const _windowChannel = MethodChannel('personal.sara/window');
 
-  bool _isMaximized = false;
+  bool _isMaximized = true;
 
   Future<void> _runWindowAction(
     String action, {
@@ -4134,128 +4135,144 @@ class _LinuxWindowTitleBarState extends State<_LinuxWindowTitleBar> {
         decoration: const BoxDecoration(
           border: Border(bottom: BorderSide(color: Color(0xFF34363B))),
         ),
-        child: Row(
+        child: Stack(
           children: [
-            const SizedBox(width: 10),
-            Image.asset(
-              'assets/flutter_logo.png',
-              key: const ValueKey('linux-window-app-icon'),
-              width: 27,
-              height: 27,
-              fit: BoxFit.contain,
-              filterQuality: FilterQuality.medium,
+            Row(
+              children: [
+                const SizedBox(width: 10),
+                Image.asset(
+                  'assets/flutter_logo.png',
+                  key: const ValueKey('linux-window-app-icon'),
+                  width: 27,
+                  height: 27,
+                  fit: BoxFit.contain,
+                  filterQuality: FilterQuality.medium,
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  'Sara',
+                  style: TextStyle(
+                    color: Color(0xFFE6E8EB),
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onPanStart: _startDragging,
+                    onDoubleTap: () =>
+                        unawaited(_runWindowAction('toggleMaximize')),
+                    child: MouseRegion(
+                      cursor: SystemMouseCursors.move,
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+                _GitHubCommitButton(
+                  service: widget.githubCommitService,
+                  onOpenUrl: widget.onOpenLink,
+                  onError: widget.onError,
+                ),
+                SizedBox(
+                  width: 38,
+                  height: 36,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      IconButton(
+                        key: const ValueKey('error-notification-bell'),
+                        onPressed: widget.onNotificationsPressed,
+                        color: const Color(0xFFB6BAC2),
+                        iconSize: 18,
+                        padding: EdgeInsets.zero,
+                        icon: const Icon(Icons.notifications_none),
+                      ),
+                      if (widget.unreadNotificationCount > 0)
+                        Positioned(
+                          top: 2,
+                          right: 6,
+                          child: IgnorePointer(
+                            child: Container(
+                              key: const ValueKey('unread-notification-count'),
+                              constraints: const BoxConstraints(minWidth: 15),
+                              height: 15,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 3,
+                              ),
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFE24B4B),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: const Color(0xFF24262A),
+                                  width: 1,
+                                ),
+                              ),
+                              child: Text(
+                                widget.unreadNotificationCount > 99
+                                    ? '99+'
+                                    : '${widget.unreadNotificationCount}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 8,
+                                  fontWeight: FontWeight.w700,
+                                  height: 1,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                Container(
+                  width: 1,
+                  height: 18,
+                  margin: const EdgeInsets.symmetric(horizontal: 2),
+                  color: const Color(0xFF55585E),
+                ),
+                _LinuxWindowControl(
+                  key: const ValueKey('linux-window-minimize'),
+                  icon: _WindowControlIcon.minimize,
+                  onPressed: () => unawaited(_runWindowAction('minimize')),
+                  height: 36,
+                ),
+                _LinuxWindowControl(
+                  key: const ValueKey('linux-window-maximize'),
+                  icon: _isMaximized
+                      ? _WindowControlIcon.restore
+                      : _WindowControlIcon.maximize,
+                  onPressed: () =>
+                      unawaited(_runWindowAction('toggleMaximize')),
+                  height: 36,
+                ),
+                _LinuxWindowControl(
+                  key: const ValueKey('linux-window-close'),
+                  icon: _WindowControlIcon.close,
+                  hoverColor: const Color(0xFFC42B1C),
+                  onPressed: () => unawaited(_runWindowAction('close')),
+                  height: 36,
+                ),
+              ],
             ),
-            const SizedBox(width: 8),
-            const Text(
-              'Sara',
-              style: TextStyle(
-                color: Color(0xFFE6E8EB),
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            Expanded(
+            Center(
               child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
                 onPanStart: _startDragging,
                 onDoubleTap: () =>
                     unawaited(_runWindowAction('toggleMaximize')),
                 child: MouseRegion(
                   cursor: SystemMouseCursors.move,
-                  child: Center(
-                    child: Text(
-                      appText('Personal AI Chat'),
-                      style: const TextStyle(
-                        color: Color(0xFFB6BAC2),
-                        fontSize: 12,
-                        fontWeight: FontWeight.w400,
-                      ),
+                  child: Text(
+                    appText('Anti Politicism'),
+                    style: const TextStyle(
+                      color: Color(0xFFB6BAC2),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w400,
                     ),
                   ),
                 ),
               ),
-            ),
-            _GitHubCommitButton(
-              service: widget.githubCommitService,
-              onOpenUrl: widget.onOpenLink,
-              onError: widget.onError,
-            ),
-            SizedBox(
-              width: 38,
-              height: 36,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  IconButton(
-                    key: const ValueKey('error-notification-bell'),
-                    onPressed: widget.onNotificationsPressed,
-                    color: const Color(0xFFB6BAC2),
-                    iconSize: 18,
-                    padding: EdgeInsets.zero,
-                    icon: const Icon(Icons.notifications_none),
-                  ),
-                  if (widget.unreadNotificationCount > 0)
-                    Positioned(
-                      top: 2,
-                      right: 6,
-                      child: IgnorePointer(
-                        child: Container(
-                          key: const ValueKey('unread-notification-count'),
-                          constraints: const BoxConstraints(minWidth: 15),
-                          height: 15,
-                          padding: const EdgeInsets.symmetric(horizontal: 3),
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFE24B4B),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: const Color(0xFF24262A),
-                              width: 1,
-                            ),
-                          ),
-                          child: Text(
-                            widget.unreadNotificationCount > 99
-                                ? '99+'
-                                : '${widget.unreadNotificationCount}',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 8,
-                              fontWeight: FontWeight.w700,
-                              height: 1,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            Container(
-              width: 1,
-              height: 18,
-              margin: const EdgeInsets.symmetric(horizontal: 2),
-              color: const Color(0xFF55585E),
-            ),
-            _LinuxWindowControl(
-              key: const ValueKey('linux-window-minimize'),
-              icon: _WindowControlIcon.minimize,
-              onPressed: () => unawaited(_runWindowAction('minimize')),
-              height: 36,
-            ),
-            _LinuxWindowControl(
-              key: const ValueKey('linux-window-maximize'),
-              icon: _isMaximized
-                  ? _WindowControlIcon.restore
-                  : _WindowControlIcon.maximize,
-              onPressed: () => unawaited(_runWindowAction('toggleMaximize')),
-              height: 36,
-            ),
-            _LinuxWindowControl(
-              key: const ValueKey('linux-window-close'),
-              icon: _WindowControlIcon.close,
-              hoverColor: const Color(0xFFC42B1C),
-              onPressed: () => unawaited(_runWindowAction('close')),
-              height: 36,
             ),
           ],
         ),
@@ -4398,6 +4415,7 @@ class _SettingsDialog extends StatefulWidget {
     required this.saraCameraActive,
     required this.onStopSaraCamera,
     required this.onErrorNotification,
+    required this.onOpenLink,
   });
 
   final AiConfigStore configStore;
@@ -4411,6 +4429,7 @@ class _SettingsDialog extends StatefulWidget {
   final ValueListenable<bool> saraCameraActive;
   final VoidCallback onStopSaraCamera;
   final void Function(String message) onErrorNotification;
+  final Future<void> Function(String href) onOpenLink;
 
   @override
   State<_SettingsDialog> createState() => _SettingsDialogState();
@@ -4794,10 +4813,12 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                     ),
                   ),
                   const Spacer(),
-                  const Icon(
-                    LucideIcons300.slidersHorizontal,
+                  IconButton(
+                    key: const ValueKey('settings-about-button'),
+                    tooltip: appText('About Sara'),
+                    onPressed: () => setState(() => _section = 3),
+                    icon: const Icon(LucideIcons300.circleAlert, size: 17),
                     color: _muted,
-                    size: 17,
                   ),
                   const SizedBox(width: 8),
                   IconButton(
@@ -4833,6 +4854,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                           ),
                         ),
                         _SettingsNavItem(
+                          key: const ValueKey('settings-nav-personal'),
                           icon: const Icon(LucideIcons300.userRound),
                           label: appText('Personal'),
                           selected: _section == 0,
@@ -4851,6 +4873,7 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                         ),
                         const SizedBox(height: 5),
                         _SettingsNavItem(
+                          key: const ValueKey('settings-nav-data'),
                           icon: const _DatabaseStackIcon(size: 18),
                           label: appText('Data'),
                           selected: _section == 2,
@@ -4938,6 +4961,11 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                                   _onWebSearchEnabledChanged,
                               onSaveWebSearch: _saveWebSearchConfig,
                               onRemoveApiKey: _confirmRemoveApiKey,
+                            ),
+                          ),
+                          3 => SingleChildScrollView(
+                            child: _AboutSettings(
+                              onOpenLink: widget.onOpenLink,
                             ),
                           ),
                           _ => SingleChildScrollView(
@@ -5705,6 +5733,112 @@ class _DataSettings extends StatelessWidget {
                   backgroundColor: const Color(0xFF8F323A),
                   side: const BorderSide(color: Color(0xFFB94A55)),
                 ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _AboutSettings extends StatelessWidget {
+  const _AboutSettings({required this.onOpenLink});
+
+  final Future<void> Function(String href) onOpenLink;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const ValueKey('about-settings-content'),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SettingsSectionHeader(
+          icon: const Icon(LucideIcons300.circleAlert),
+          title: appText('About Sara'),
+          subtitle: appText('Learn about Sara and get help.'),
+        ),
+        _MacSettingsCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                appText('A personal AI chat for your desktop.'),
+                style: const TextStyle(
+                  color: _text,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                appText(
+                  'Sara is powered by Google Gemini and is ready to help with questions, ideas, and everyday conversations.',
+                ),
+                style: const TextStyle(
+                  color: _muted,
+                  fontSize: 12,
+                  height: 1.5,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                appText(
+                  'Chat history stays on this device, and Gemini API keys are stored in the Linux keyring. Messages and attachments you choose to send are processed by Google Gemini to generate replies.',
+                ),
+                style: const TextStyle(
+                  color: _muted,
+                  fontSize: 12,
+                  height: 1.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        _MacSettingsCard(
+          child: Row(
+            children: [
+              const Icon(
+                Icons.support_agent_outlined,
+                color: _accent,
+                size: 22,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      appText('Support & feedback'),
+                      style: const TextStyle(
+                        color: _text,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      appText(
+                        'Report a problem or get help in the Sara issue tracker.',
+                      ),
+                      style: const TextStyle(
+                        color: _muted,
+                        fontSize: 11,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              TextButton.icon(
+                key: const ValueKey('about-support-button'),
+                onPressed: () => unawaited(
+                  onOpenLink('https://github.com/neveerlabs/Sara/issues'),
+                ),
+                icon: const Icon(LucideIcons300.externalLink, size: 16),
+                label: Text(appText('Open GitHub issues')),
               ),
             ],
           ),
@@ -6782,10 +6916,13 @@ class _ConversationView extends StatelessWidget {
                 16.0,
                 double.infinity,
               ),
-              bottom: 0,
+              bottom: 8,
               child: Material(
+                key: const ValueKey('scroll-to-bottom-surface'),
                 color: const Color(0xFF20242B),
-                shape: const CircleBorder(),
+                shape: const CircleBorder(
+                  side: BorderSide(color: Color(0xFF55565B)),
+                ),
                 elevation: 1,
                 child: SizedBox(
                   width: 32,

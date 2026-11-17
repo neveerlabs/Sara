@@ -981,6 +981,85 @@ void main() {
     expect(notificationArguments.single.last, 'The result is ready.');
   });
 
+  testWidgets('Settings About opens from the header without a nav selection', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    SharedPreferences.setMockInitialValues({});
+    AppLanguageController.language.value = AppLanguage.english;
+    addTearDown(() async {
+      AppLanguageController.language.value = AppLanguage.english;
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setString('app_language', 'en');
+    });
+    final openedUrls = <Uri>[];
+
+    await tester.pumpWidget(
+      _testApp(
+        configStore: _MemoryAiConfigStore(),
+        messageStore: _MemoryMessageStore(),
+        replyService: _FakeReplyService(),
+        openExternalLink: (uri) async => openedUrls.add(uri),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+
+    final aboutButton = find.byKey(const ValueKey('settings-about-button'));
+    expect(tester.widget<IconButton>(aboutButton).tooltip, 'About Sara');
+    expect(
+      find.descendant(
+        of: aboutButton,
+        matching: find.byIcon(LucideIcons300.circleAlert),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(aboutButton);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('about-settings-content')),
+      findsOneWidget,
+    );
+    expect(find.text('A personal AI chat for your desktop.'), findsOneWidget);
+    expect(find.text('Support & feedback'), findsOneWidget);
+    await AppLanguageController.set(AppLanguage.indonesian);
+    await tester.pumpAndSettle();
+    expect(find.text('Tentang Sara'), findsOneWidget);
+    expect(find.text('Dukungan & masukan'), findsOneWidget);
+    await AppLanguageController.set(AppLanguage.english);
+    await tester.pumpAndSettle();
+    for (final key in [
+      'settings-nav-personal',
+      'settings-nav-configure',
+      'settings-nav-data',
+    ]) {
+      final navItem = find.byKey(ValueKey(key));
+      final navSurface = tester.widget<Container>(
+        find.descendant(of: navItem, matching: find.byType(Container)).first,
+      );
+      expect(
+        (navSurface.decoration! as BoxDecoration).color,
+        Colors.transparent,
+      );
+    }
+
+    await tester.tap(find.byKey(const ValueKey('about-support-button')));
+    await tester.pumpAndSettle();
+    expect(openedUrls, [
+      Uri.parse('https://github.com/neveerlabs/Sara/issues'),
+    ]);
+    await tester.tap(find.byKey(const ValueKey('settings-nav-personal')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('about-settings-content')), findsNothing);
+    await tester.tap(find.byTooltip('Close settings'));
+    await tester.pumpAndSettle();
+  });
+
   testWidgets('English is the default and language changes update the UI', (
     tester,
   ) async {
@@ -2154,6 +2233,13 @@ void main() {
     expect(find.byType(Scrollbar), findsOneWidget);
     expect(tester.getSize(scrollButton), const Size(32, 32));
     final scrollButtonRect = tester.getRect(scrollButton);
+    final scrollButtonShape =
+        tester
+                .widget<Material>(
+                  find.byKey(const ValueKey('scroll-to-bottom-surface')),
+                )
+                .shape!
+            as CircleBorder;
     final composerRect = tester.getRect(
       find.byKey(const ValueKey('chat-composer')),
     );
@@ -2162,6 +2248,8 @@ void main() {
       lessThanOrEqualTo(2),
     );
     expect(scrollButtonRect.bottom, lessThan(composerRect.top));
+    expect(composerRect.top - scrollButtonRect.bottom, closeTo(8, 1));
+    expect(scrollButtonShape.side.color, const Color(0xFF55565B));
     expect(composerRect.top - scrollButtonRect.bottom, lessThanOrEqualTo(12));
     expect(find.byKey(const ValueKey('scroll-to-bottom-icon')), findsOneWidget);
     expect(
@@ -4247,10 +4335,13 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     const channel = MethodChannel('personal.sara/window');
     final calls = <String>[];
+    var isMaximized = true;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
           calls.add(call.method);
-          return call.method == 'toggleMaximize' ? true : null;
+          if (call.method != 'toggleMaximize') return null;
+          isMaximized = !isMaximized;
+          return isMaximized;
         });
     addTearDown(
       () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -4275,9 +4366,13 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Sara'), findsOneWidget);
-    expect(find.text('Personal AI Chat'), findsOneWidget);
+    expect(find.text('Anti Politicism'), findsOneWidget);
     final titleBar = find.byKey(const ValueKey('linux-window-title-bar'));
     expect(tester.getSize(titleBar).height, 36);
+    expect(
+      tester.getCenter(find.text('Anti Politicism')).dx,
+      closeTo(tester.getCenter(titleBar).dx, 0.5),
+    );
     expect(
       tester
           .widget<CustomPaint>(
@@ -4295,18 +4390,22 @@ void main() {
           .fontSize,
       15,
     );
+    expect(
+      find.byKey(const ValueKey('window-control-icon-restore')),
+      findsOneWidget,
+    );
     await tester.tap(find.byKey(const ValueKey('linux-window-minimize')));
     await tester.tap(find.byKey(const ValueKey('linux-window-maximize')));
     await tester.pump();
     expect(
-      find.byKey(const ValueKey('window-control-icon-restore')),
+      find.byKey(const ValueKey('window-control-icon-maximize')),
       findsOneWidget,
     );
     expect(
       find.descendant(of: titleBar, matching: find.byType(Tooltip)),
       findsNothing,
     );
-    await tester.drag(find.text('Personal AI Chat'), const Offset(25, 0));
+    await tester.drag(find.text('Anti Politicism'), const Offset(25, 0));
     await tester.pump(const Duration(milliseconds: 50));
     await tester.tap(find.byKey(const ValueKey('linux-window-close')));
     await tester.pump();
