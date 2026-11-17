@@ -8,9 +8,10 @@ import 'package:emoji_picker_flutter/emoji_picker_flutter.dart' as emoji_picker;
 import 'package:emoji_picker_flutter/locales/emoji_set_en.dart'
     show emojiSetEnglish;
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart' show ValueListenable;
+import 'package:flutter/foundation.dart' show ValueListenable, kReleaseMode;
 import 'package:flutter/material.dart';
-import 'package:flutter/gestures.dart' show PointerScrollEvent;
+import 'package:flutter/gestures.dart'
+    show PointerScrollEvent, PointerSignalEvent;
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:file_picker/file_picker.dart';
@@ -23,6 +24,7 @@ import 'package:lucide_icons_flutter/lucide_icons_300.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
@@ -41,6 +43,7 @@ import 'chat_message.dart';
 import 'gemini_reply_service.dart';
 import 'desktop_notification_service.dart';
 import 'github_commit_service.dart';
+import 'github_release_service.dart';
 import 'link_preview_service.dart';
 import 'message_database.dart';
 import 'sara_backup.dart';
@@ -505,6 +508,7 @@ class SaraApp extends StatefulWidget {
     this.notificationSoundPlayer,
     this.linkPreviewService,
     this.githubCommitService,
+    this.githubReleaseService,
     this.openExternalLink,
   });
 
@@ -521,6 +525,7 @@ class SaraApp extends StatefulWidget {
   final Future<void> Function(String assetPath)? notificationSoundPlayer;
   final LinkPreviewService? linkPreviewService;
   final GitHubCommitService? githubCommitService;
+  final GitHubReleaseService? githubReleaseService;
   final Future<void> Function(Uri uri)? openExternalLink;
 
   @override
@@ -607,6 +612,7 @@ class _SaraAppState extends State<SaraApp> {
           notificationSoundPlayer: widget.notificationSoundPlayer,
           linkPreviewService: widget.linkPreviewService,
           githubCommitService: widget.githubCommitService,
+          githubReleaseService: widget.githubReleaseService,
           openExternalLink: widget.openExternalLink,
         ),
       ),
@@ -630,6 +636,7 @@ class ChatPage extends StatefulWidget {
     this.notificationSoundPlayer,
     this.linkPreviewService,
     this.githubCommitService,
+    this.githubReleaseService,
     this.openExternalLink,
   });
 
@@ -646,6 +653,7 @@ class ChatPage extends StatefulWidget {
   final Future<void> Function(String assetPath)? notificationSoundPlayer;
   final LinkPreviewService? linkPreviewService;
   final GitHubCommitService? githubCommitService;
+  final GitHubReleaseService? githubReleaseService;
   final Future<void> Function(Uri uri)? openExternalLink;
 
   @override
@@ -656,6 +664,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   final _messageController = _EmojiAwareTextEditingController();
   final _messageFocus = FocusNode();
   final _scrollController = ScrollController();
+  final _conversationListKey = GlobalKey();
   final _composerKey = GlobalKey<_ComposerState>();
   final List<ChatMessage> _messages = [];
   final Map<String, ChatMessage> _repliesNeedingSave = {};
@@ -2546,6 +2555,27 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     _followLatestDuringStreaming = _scrollController.position.extentAfter <= 80;
   }
 
+  bool _pointerIsWithin(BuildContext? targetContext, Offset globalPosition) {
+    final renderObject = targetContext?.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) return false;
+    return (Offset.zero & renderObject.size).contains(
+      renderObject.globalToLocal(globalPosition),
+    );
+  }
+
+  void _handleBodyPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent ||
+        event.scrollDelta.dy == 0 ||
+        !_scrollController.hasClients) {
+      return;
+    }
+    if (_pointerIsWithin(_conversationListKey.currentContext, event.position)) {
+      return;
+    }
+    _scrollController.position.pointerScroll(event.scrollDelta.dy);
+    _handleUserScroll();
+  }
+
   int get _unreadErrorNotificationCount =>
       _errorNotifications.where((notification) => !notification.isRead).length;
 
@@ -3020,6 +3050,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                 unreadNotificationCount: _unreadErrorNotificationCount,
                 onNotificationsPressed: _toggleErrorNotificationPanel,
                 githubCommitService: widget.githubCommitService,
+                githubReleaseService: widget.githubReleaseService,
                 onOpenLink: _openSearchResultLink,
                 onError: (message) => _showMessage(message),
               ),
@@ -3036,6 +3067,13 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                 },
                 child: Stack(
                   children: [
+                    Positioned.fill(
+                      child: Listener(
+                        behavior: HitTestBehavior.opaque,
+                        onPointerSignal: _handleBodyPointerSignal,
+                        child: const SizedBox.expand(),
+                      ),
+                    ),
                     Positioned(
                       left: 0,
                       right: 0,
@@ -3082,6 +3120,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                                     _openSearchResultLink,
                                                 scrollController:
                                                     _scrollController,
+                                                conversationListKey:
+                                                    _conversationListKey,
                                                 isSending:
                                                     _isSending ||
                                                     _isSavingClarification,
@@ -3945,7 +3985,8 @@ class _GitHubCommitPreviewCard extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             commit.message.split('\n').first,
-            maxLines: 2,
+            key: const ValueKey('github-commit-message'),
+            maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(
               color: Color(0xFFD6D9E0),
@@ -4079,6 +4120,7 @@ class _LinuxWindowTitleBar extends StatefulWidget {
     required this.onOpenLink,
     required this.onError,
     this.githubCommitService,
+    this.githubReleaseService,
   });
 
   final int unreadNotificationCount;
@@ -4086,6 +4128,7 @@ class _LinuxWindowTitleBar extends StatefulWidget {
   final Future<void> Function(String url) onOpenLink;
   final ValueChanged<String> onError;
   final GitHubCommitService? githubCommitService;
+  final GitHubReleaseService? githubReleaseService;
 
   @override
   State<_LinuxWindowTitleBar> createState() => _LinuxWindowTitleBarState();
@@ -4095,6 +4138,57 @@ class _LinuxWindowTitleBarState extends State<_LinuxWindowTitleBar> {
   static const _windowChannel = MethodChannel('personal.sara/window');
 
   bool _isMaximized = true;
+  GitHubRelease? _availableRelease;
+  GitHubReleaseService? _ownedReleaseService;
+
+  GitHubReleaseService get _releaseService =>
+      widget.githubReleaseService ??
+      (_ownedReleaseService ??= GitHubReleaseService());
+
+  @override
+  void initState() {
+    super.initState();
+    if (Platform.isLinux &&
+        (kReleaseMode || widget.githubReleaseService != null)) {
+      unawaited(_checkForUpdate());
+    }
+  }
+
+  @override
+  void dispose() {
+    _ownedReleaseService?.close();
+    super.dispose();
+  }
+
+  Future<void> _checkForUpdate() async {
+    try {
+      if (widget.githubReleaseService == null) {
+        await _releaseService.cleanupPreviousInstall(
+          Directory(path.dirname(Platform.resolvedExecutable)),
+        );
+      }
+      final packageInfo = await PackageInfo.fromPlatform();
+      final release = await _releaseService.fetchLatestRelease();
+      if (!mounted || !release.isNewerThan(packageInfo.version)) return;
+      setState(() => _availableRelease = release);
+    } catch (error) {
+      debugPrint('Could not check for Sara updates: $error');
+    }
+  }
+
+  Future<void> _showUpdateDialog() async {
+    final release = _availableRelease;
+    if (release == null) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => _GitHubUpdateDialog(
+        release: release,
+        releaseService: _releaseService,
+        installDirectory: Directory(path.dirname(Platform.resolvedExecutable)),
+        onCloseSara: () => unawaited(_runWindowAction('close')),
+      ),
+    );
+  }
 
   Future<void> _runWindowAction(
     String action, {
@@ -4169,6 +4263,41 @@ class _LinuxWindowTitleBarState extends State<_LinuxWindowTitleBar> {
                     ),
                   ),
                 ),
+                if (_availableRelease != null)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 4),
+                    child: Semantics(
+                      label: appText('Update available'),
+                      button: true,
+                      child: InkWell(
+                        key: const ValueKey('github-update-button'),
+                        onTap: () => unawaited(_showUpdateDialog()),
+                        borderRadius: BorderRadius.circular(4),
+                        child: Container(
+                          key: const ValueKey('github-update-surface'),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 7,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF2E8B57),
+                            border: Border.all(color: const Color(0xFF2E8B57)),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            'UPDATE',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 9,
+                              height: 1,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.4,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
                 _GitHubCommitButton(
                   service: widget.githubCommitService,
                   onOpenUrl: widget.onOpenLink,
@@ -4277,6 +4406,121 @@ class _LinuxWindowTitleBarState extends State<_LinuxWindowTitleBar> {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _GitHubUpdateDialog extends StatefulWidget {
+  const _GitHubUpdateDialog({
+    required this.release,
+    required this.releaseService,
+    required this.installDirectory,
+    required this.onCloseSara,
+  });
+
+  final GitHubRelease release;
+  final GitHubReleaseService releaseService;
+  final Directory installDirectory;
+  final VoidCallback onCloseSara;
+
+  @override
+  State<_GitHubUpdateDialog> createState() => _GitHubUpdateDialogState();
+}
+
+class _GitHubUpdateDialogState extends State<_GitHubUpdateDialog> {
+  bool _isInstalling = false;
+  bool _isInstalled = false;
+  String? _error;
+
+  Future<void> _installUpdate() async {
+    setState(() {
+      _isInstalling = true;
+      _error = null;
+    });
+    try {
+      await widget.releaseService.downloadAndInstall(
+        widget.release,
+        installDirectory: widget.installDirectory,
+      );
+      if (mounted) setState(() => _isInstalled = true);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = '$error');
+      }
+    } finally {
+      if (mounted) setState(() => _isInstalling = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(
+        appText(
+          _isInstalled ? 'Update installed' : 'Update available: {version}',
+          values: {'version': widget.release.version},
+        ),
+      ),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (_isInstalling) ...[
+              const LinearProgressIndicator(),
+              const SizedBox(height: 14),
+              Text(appText('Downloading and installing the update...')),
+            ] else if (_isInstalled)
+              Text(
+                appText(
+                  'Update installed. Close and reopen Sara to use version {version}.',
+                  values: {'version': widget.release.version},
+                ),
+              )
+            else
+              Text(
+                appText(
+                  'Version {version} is available. Sara will download and verify the Linux package before installing it.',
+                  values: {'version': widget.release.version},
+                ),
+              ),
+            if (_error != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                appText('Update failed: {error}', values: {'error': _error}),
+                style: const TextStyle(color: Color(0xFFFF8585)),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        if (_isInstalled) ...[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(appText('Later')),
+          ),
+          FilledButton(
+            key: const ValueKey('close-sara-for-update'),
+            onPressed: () {
+              Navigator.of(context).pop();
+              widget.onCloseSara();
+            },
+            child: Text(appText('Close Sara')),
+          ),
+        ] else ...[
+          TextButton(
+            onPressed: _isInstalling ? null : () => Navigator.of(context).pop(),
+            child: Text(appText('Later')),
+          ),
+          FilledButton(
+            key: const ValueKey('install-sara-update'),
+            onPressed: _isInstalling ? null : _installUpdate,
+            child: Text(appText(_error == null ? 'Install update' : 'Retry')),
+          ),
+        ],
+      ],
     );
   }
 }
@@ -4453,11 +4697,13 @@ class _SettingsDialogState extends State<_SettingsDialog> {
   bool _isBackingUpData = false;
   bool _showConfigureHelp = false;
   late bool _cameraEnabled;
+  late final Future<PackageInfo> _appPackageInfo;
 
   @override
   void initState() {
     super.initState();
     _cameraEnabled = widget.cameraEnabled;
+    _appPackageInfo = PackageInfo.fromPlatform();
     _loadAiConfig();
     _loadPersonal();
   }
@@ -4878,6 +5124,47 @@ class _SettingsDialogState extends State<_SettingsDialog> {
                           label: appText('Data'),
                           selected: _section == 2,
                           onTap: () => setState(() => _section = 2),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(39, 8, 0, 0),
+                          child: FutureBuilder<PackageInfo>(
+                            future: _appPackageInfo,
+                            builder: (context, snapshot) {
+                              if (snapshot.hasError) {
+                                return Text(
+                                  appText('Version unavailable'),
+                                  key: const ValueKey('settings-app-version'),
+                                  style: const TextStyle(
+                                    color: _muted,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                );
+                              }
+                              final info = snapshot.data;
+                              if (info == null) {
+                                return const SizedBox(height: 14);
+                              }
+                              final buildSuffix = info.buildNumber.isEmpty
+                                  ? ''
+                                  : '+${info.buildNumber}';
+                              return Text(
+                                appText(
+                                  'Version {version}',
+                                  values: {
+                                    'version': '${info.version}$buildSuffix',
+                                  },
+                                ),
+                                key: const ValueKey('settings-app-version'),
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: _muted,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              );
+                            },
+                          ),
                         ),
                         const Spacer(),
                         Container(
@@ -6706,6 +6993,7 @@ class _ConversationView extends StatelessWidget {
     required this.linkPreviewService,
     required this.onOpenLink,
     required this.scrollController,
+    required this.conversationListKey,
     required this.isSending,
     required this.showReplyIndicator,
     required this.retryErrors,
@@ -6739,6 +7027,7 @@ class _ConversationView extends StatelessWidget {
   final LinkPreviewService linkPreviewService;
   final Future<void> Function(String href) onOpenLink;
   final ScrollController scrollController;
+  final GlobalKey conversationListKey;
   final bool isSending;
   final bool showReplyIndicator;
   final Map<String, String> retryErrors;
@@ -6817,6 +7106,7 @@ class _ConversationView extends StatelessWidget {
                     context,
                   ).copyWith(scrollbars: false),
                   child: ListView.builder(
+                    key: conversationListKey,
                     controller: scrollController,
                     padding: const EdgeInsets.fromLTRB(0, 42, 0, 24),
                     itemCount: messages.length + (showReplyIndicator ? 1 : 0),

@@ -54,6 +54,22 @@ String appText(String english, {Map<String, Object?> values = const {}}) {
 
 const _indonesian = <String, String>{
   'Settings': 'Pengaturan',
+  'Version {version}': 'Versi {version}',
+  'Version unavailable': 'Versi tidak tersedia',
+  'Update available': 'Pembaruan tersedia',
+  'Update available: {version}': 'Pembaruan tersedia: {version}',
+  'Update installed': 'Pembaruan terpasang',
+  'Version {version} is available. Sara will download and verify the Linux package before installing it.':
+      'Versi {version} tersedia. Sara akan mengunduh dan memverifikasi paket Linux sebelum memasangnya.',
+  'Downloading and installing the update...':
+      'Mengunduh dan memasang pembaruan...',
+  'Update installed. Close and reopen Sara to use version {version}.':
+      'Pembaruan terpasang. Tutup dan buka kembali Sara untuk memakai versi {version}.',
+  'Update failed: {error}': 'Pembaruan gagal: {error}',
+  'Install update': 'Pasang pembaruan',
+  'Close Sara': 'Tutup Sara',
+  'Later': 'Nanti',
+  'Retry': 'Coba lagi',
   'About Sara': 'Tentang Sara',
   'Learn about Sara and get help.': 'Kenali Sara dan dapatkan bantuan.',
   'A personal AI chat for your desktop.': 'Chat AI personal untuk desktop-mu.',

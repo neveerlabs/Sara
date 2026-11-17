@@ -15,6 +15,7 @@ import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:lucide_icons_flutter/lucide_icons_300.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sara_desktop/ai_config_store.dart';
 import 'package:sara_desktop/app_localizations.dart';
@@ -25,6 +26,7 @@ import 'package:sara_desktop/camera_capture_cache.dart';
 import 'package:sara_desktop/desktop_notification_service.dart';
 import 'package:sara_desktop/gemini_reply_service.dart';
 import 'package:sara_desktop/github_commit_service.dart';
+import 'package:sara_desktop/github_release_service.dart';
 import 'package:sara_desktop/link_preview_service.dart';
 import 'package:sara_desktop/main.dart';
 import 'package:sara_desktop/message_database.dart';
@@ -36,6 +38,70 @@ void main() {
   setUp(() {
     AppLanguageController.language.value = AppLanguage.english;
     SharedPreferences.setMockInitialValues({'app_language': 'en'});
+  });
+
+  testWidgets('shows update badge for a newer GitHub release', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    PackageInfo.setMockInitialValues(
+      appName: 'Sara',
+      packageName: 'sara_desktop',
+      version: '1.1.5',
+      buildNumber: '8',
+      buildSignature: '',
+    );
+    addTearDown(
+      () => PackageInfo.setMockInitialValues(
+        appName: '',
+        packageName: '',
+        version: '',
+        buildNumber: '',
+        buildSignature: '',
+      ),
+    );
+
+    final digest = List.filled(64, '0').join();
+    final service = GitHubReleaseService(
+      client: MockClient((request) async {
+        expect(request.url.path, '/repos/neveerlabs/Sara/releases/latest');
+        return http.Response(
+          jsonEncode({
+            'tag_name': 'v1.1.4',
+            'html_url':
+                'https://github.com/neveerlabs/Sara/releases/tag/v1.1.4',
+            'assets': [
+              {
+                'name': 'sara_linux_amd64.deb',
+                'digest': 'sha256:$digest',
+                'size': 1,
+                'browser_download_url':
+                    'https://github.com/neveerlabs/Sara/releases/download/v1.1.4/sara_linux_amd64.deb',
+              },
+            ],
+          }),
+          200,
+        );
+      }),
+    );
+
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: _MemoryMessageStore(),
+        replyService: _FakeReplyService(),
+        githubReleaseService: service,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('github-update-button')), findsOneWidget);
+    final updateSurface = tester.widget<Container>(
+      find.byKey(const ValueKey('github-update-surface')),
+    );
+    final updateDecoration = updateSurface.decoration! as BoxDecoration;
+    expect(updateDecoration.color, const Color(0xFF2E8B57));
+    expect(tester.widget<Text>(find.text('UPDATE')).style!.color, Colors.white);
   });
 
   testWidgets(
@@ -1060,6 +1126,61 @@ void main() {
     await tester.pumpAndSettle();
   });
 
+  testWidgets('settings sidebar shows version and build below Data', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    PackageInfo.setMockInitialValues(
+      appName: 'Sara',
+      packageName: 'sara_desktop',
+      version: '1.1.5',
+      buildNumber: '8',
+      buildSignature: '',
+    );
+    addTearDown(
+      () => PackageInfo.setMockInitialValues(
+        appName: '',
+        packageName: '',
+        version: '',
+        buildNumber: '',
+        buildSignature: '',
+      ),
+    );
+
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: _MemoryMessageStore(),
+        replyService: _FakeReplyService(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+
+    final dataItem = find.byKey(const ValueKey('settings-nav-data'));
+    final versionLabel = find.byKey(const ValueKey('settings-app-version'));
+    expect(find.text('Version 1.1.5+8'), findsOneWidget);
+    expect(
+      tester.getRect(versionLabel).top,
+      greaterThan(tester.getRect(dataItem).bottom),
+    );
+    expect(
+      tester.getRect(versionLabel).top - tester.getRect(dataItem).bottom,
+      lessThan(20),
+    );
+    expect(
+      tester.getRect(versionLabel).bottom,
+      lessThan(
+        tester
+            .getRect(find.byKey(const ValueKey('developer-brand-banner')))
+            .top,
+      ),
+    );
+  });
+
   testWidgets('English is the default and language changes update the UI', (
     tester,
   ) async {
@@ -1943,6 +2064,65 @@ void main() {
     expect(
       tester.getRect(find.byKey(const ValueKey('attachment-scroll-17'))).bottom,
       lessThanOrEqualTo(uploadedViewport.bottom),
+    );
+  });
+
+  testWidgets('scroll wheel beside the composer scrolls the chat body', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final messageStore = _MemoryMessageStore()
+      ..messages.addAll(
+        List.generate(
+          18,
+          (index) => ChatMessage(
+            id: 'body-wheel-scroll-$index',
+            role: index.isEven ? 'user' : 'model',
+            content:
+                'Scrollable history message $index ${'A long line. ' * 12}',
+            timestamp: 'today',
+            createdAtUtc: index,
+          ),
+        ),
+      );
+    await tester.pumpWidget(
+      _testApp(messageStore: messageStore, replyService: _FakeReplyService()),
+    );
+    await tester.pumpAndSettle();
+
+    final listFinder = find.byType(ListView).first;
+    final scrollController = tester.widget<ListView>(listFinder).controller!;
+    final composerRect = tester.getRect(
+      find.byKey(const ValueKey('chat-composer')),
+    );
+    final scrollPosition = Offset(20, composerRect.center.dy);
+    expect(scrollPosition.dx, lessThan(composerRect.left));
+    expect(scrollController.position.extentAfter, lessThanOrEqualTo(1));
+
+    tester.binding.handlePointerEvent(
+      PointerScrollEvent(
+        position: scrollPosition,
+        scrollDelta: const Offset(0, -160),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(scrollController.position.extentAfter, greaterThan(0));
+    final pixelsBeforeListScroll = scrollController.position.pixels;
+    tester.binding.handlePointerEvent(
+      PointerScrollEvent(
+        position: tester.getCenter(listFinder),
+        scrollDelta: const Offset(0, -60),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      scrollController.position.pixels,
+      closeTo(pixelsBeforeListScroll - 60, 1),
     );
   });
 
@@ -4422,6 +4602,9 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     final requests = <Uri>[];
+    const commitMessage =
+        'feat: show latest commit with a detailed summary that extends far '
+        'beyond the available preview width';
     final client = MockClient((request) async {
       requests.add(request.url);
       if (request.url.path.endsWith('/commits')) {
@@ -4432,7 +4615,7 @@ void main() {
               'html_url':
                   'https://github.com/neveerlabs/Sara/commit/abcdef1234567890',
               'commit': {
-                'message': 'feat: show latest commit',
+                'message': commitMessage,
                 'author': {
                   'name': 'neveerlabs',
                   'date': '2026-11-15T00:41:59Z',
@@ -4479,7 +4662,12 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('neveerlabs'), findsOneWidget);
-    expect(find.text('feat: show latest commit'), findsOneWidget);
+    final commitMessageText = tester.widget<Text>(
+      find.byKey(const ValueKey('github-commit-message')),
+    );
+    expect(commitMessageText.data, commitMessage);
+    expect(commitMessageText.maxLines, 1);
+    expect(commitMessageText.overflow, TextOverflow.ellipsis);
     expect(
       find.text('2 files changed, 12 insertions, 3 deletions, 15 changes'),
       findsOneWidget,
@@ -4943,6 +5131,7 @@ SaraApp _testApp({
   Future<void> Function(String assetPath)? notificationSoundPlayer,
   LinkPreviewService? linkPreviewService,
   GitHubCommitService? githubCommitService,
+  GitHubReleaseService? githubReleaseService,
   Future<void> Function(Uri uri)? openExternalLink,
 }) {
   return SaraApp(
@@ -4960,6 +5149,7 @@ SaraApp _testApp({
     notificationSoundPlayer: notificationSoundPlayer ?? (_) async {},
     linkPreviewService: linkPreviewService,
     githubCommitService: githubCommitService,
+    githubReleaseService: githubReleaseService,
     openExternalLink: openExternalLink,
   );
 }

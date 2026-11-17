@@ -48,7 +48,7 @@ Conversation history is stored locally, and API keys are stored in the Linux `ke
 * Deleting a user message deletes that message, all its branches and AI replies (including their branches), and all subsequent messages
 * Gemini API keys belong to the user; multiple keys can be configured
 * AI tool use can increase response time
-* Times use **Jakarta Western Indonesian Time (WIB)** (e.g., `Friday, November 13, 2026, 15:35.`)
+* Times use **Jakarta Western Indonesian Time (WIB)** (e.g., `Jumat, 22 November 2026, 15:35`)
 * Web search providers are Tavily, TinyFish, and Firecrawl
 
 ## License
