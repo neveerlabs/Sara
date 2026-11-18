@@ -241,6 +241,7 @@ const _indonesian = <String, String>{
       'Tidak dapat menyimpan jawaban klarifikasi: {error}',
   'Type another answer': 'Ketik jawaban lain',
   'Your answer: {answer}': 'Jawabanmu: {answer}',
+  'Clarification: {question}': 'Klarifikasi: {question}',
   'Where your thoughts find a home...':
       'Ceritakan apa yang sedang kamu pikirkan...',
   'Add attachment': 'Tambahkan lampiran',

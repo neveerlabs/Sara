@@ -48,8 +48,8 @@ void main() {
     PackageInfo.setMockInitialValues(
       appName: 'Sara',
       packageName: 'sara_desktop',
-      version: '1.1.5',
-      buildNumber: '8',
+      version: '1.1.3',
+      buildNumber: '5',
       buildSignature: '',
     );
     addTearDown(
@@ -401,14 +401,52 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('clarification-option-0')));
     await tester.pumpAndSettle();
 
-    expect(
-      messageStore.messages
-          .lastWhere((message) => message.role == 'user')
-          .content,
-      'Which theme do you prefer?\nDark theme',
+    final submittedAnswer = messageStore.messages.lastWhere(
+      (message) => message.role == 'user',
     );
+    expect(submittedAnswer.content, 'Which theme do you prefer?\nDark theme');
     expect(find.byKey(const ValueKey('clarification-option-0')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('clarification-disclosure-toggle')),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Clarification: Which theme do you prefer?'),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('clarification-disclosure-content')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(ValueKey('user-message-plain-text-${submittedAnswer.id}')),
+      findsNothing,
+    );
+    final clarificationMessage = messageStore.messages.singleWhere(
+      (message) => message.clarification != null,
+    );
+    expect(
+      find.byKey(ValueKey('clarification-card-${clarificationMessage.id}')),
+      findsNothing,
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('clarification-disclosure-toggle')),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('clarification-disclosure-content')),
+      findsOneWidget,
+    );
     expect(find.text('Your answer: Dark theme'), findsOneWidget);
+    final summaryCard = tester.widget<Container>(
+      find.byKey(const ValueKey('clarification-disclosure-content')),
+    );
+    final summaryDecoration = summaryCard.decoration! as BoxDecoration;
+    expect(summaryDecoration.borderRadius, BorderRadius.circular(12));
+    expect(
+      find.byKey(const ValueKey('clarification-summary-answer-0')),
+      findsOneWidget,
+    );
     expect(
       replyService.lastHistory
           .singleWhere((message) => message.clarification != null)
@@ -490,23 +528,53 @@ void main() {
     final submittedAnswer = messageStore.messages
         .lastWhere((message) => message.role == 'user')
         .content;
-    expect(submittedAnswer, contains('Which platform do you mean?\nAndroid'));
     expect(
       submittedAnswer,
-      contains('Which operating system do you use?\nLinux'),
+      'Which platform do you mean?\nAndroid\n\n'
+      'Which operating system do you use?\nLinux',
     );
+    final submittedUserMessage = messageStore.messages.lastWhere(
+      (message) => message.role == 'user',
+    );
+    expect(
+      find.byKey(ValueKey('user-message-content-${submittedUserMessage.id}')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('clarification-disclosure-toggle')),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('clarification-disclosure-toggle')),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('clarification-summary-card')),
+      findsOneWidget,
+    );
+    expect(find.text('Which platform do you mean?'), findsOneWidget);
+    expect(find.text('Your answer: Android'), findsOneWidget);
+    expect(find.text('Which operating system do you use?'), findsNothing);
+    expect(find.text('Your answer: Linux'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('clarification-summary-next')));
+    await tester.pumpAndSettle();
+    expect(find.text('Which platform do you mean?'), findsNothing);
+    expect(find.text('Your answer: Android'), findsNothing);
+    expect(find.text('Which operating system do you use?'), findsOneWidget);
+    expect(find.text('Your answer: Linux'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('clarification-summary-previous')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Which platform do you mean?'), findsOneWidget);
+    expect(find.text('Your answer: Android'), findsOneWidget);
+    expect(find.text('Which operating system do you use?'), findsNothing);
+    expect(find.text('Your answer: Linux'), findsNothing);
     final completedClarification = replyService.lastHistory
         .singleWhere((message) => message.clarification != null)
         .clarification!;
     expect(completedClarification.answerAt(0), 'Android');
     expect(completedClarification.answerAt(1), 'Linux');
-
-    await tester.tap(find.byKey(const ValueKey('clarification-previous')));
-    await tester.pumpAndSettle();
-    expect(find.text('Which platform do you mean?'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('clarification-next')));
-    await tester.pumpAndSettle();
-    expect(find.text('Which operating system do you use?'), findsOneWidget);
   });
 
   testWidgets('clarification accepts a custom answer with Enter', (
@@ -543,14 +611,27 @@ void main() {
     await tester.testTextInput.receiveAction(TextInputAction.send);
     await tester.pumpAndSettle();
 
+    final submittedAnswer = messageStore.messages.lastWhere(
+      (message) => message.role == 'user',
+    );
     expect(
-      messageStore.messages
-          .lastWhere((message) => message.role == 'user')
-          .content,
+      submittedAnswer.content,
       'Which theme do you prefer?\nUse a blue accent instead.',
     );
     expect(
+      find.byKey(ValueKey('user-message-content-${submittedAnswer.id}')),
+      findsNothing,
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('clarification-disclosure-toggle')),
+    );
+    await tester.pumpAndSettle();
+    expect(
       find.text('Your answer: Use a blue accent instead.'),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('clarification-disclosure-content')),
       findsOneWidget,
     );
   });
@@ -1136,8 +1217,8 @@ void main() {
     PackageInfo.setMockInitialValues(
       appName: 'Sara',
       packageName: 'sara_desktop',
-      version: '1.1.5',
-      buildNumber: '8',
+      version: '1.1.6',
+      buildNumber: '6',
       buildSignature: '',
     );
     addTearDown(
@@ -1162,7 +1243,7 @@ void main() {
 
     final dataItem = find.byKey(const ValueKey('settings-nav-data'));
     final versionLabel = find.byKey(const ValueKey('settings-app-version'));
-    expect(find.text('Version 1.1.5+8'), findsOneWidget);
+    expect(find.text('Version 1.1.6+6'), findsOneWidget);
     expect(
       tester.getRect(versionLabel).top,
       greaterThan(tester.getRect(dataItem).bottom),

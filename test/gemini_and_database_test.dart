@@ -237,6 +237,64 @@ void main() {
       expect(updates, ['Hello', 'Hello there']);
     });
 
+    test('converts HTML-formatted replies to Markdown before returning', () async {
+      SharedPreferences.setMockInitialValues({});
+      final preferences = await SharedPreferences.getInstance();
+      final config = _MemoryAiConfigStore()
+        ..apiKeys = ['stream-key']
+        ..values['ai_model'] = 'gemini-3.5-flash-lite';
+      final updates = <String>[];
+      final service = GeminiReplyService(
+        configStore: config,
+        preferences: preferences,
+        client: MockClient((request) async {
+          final body = jsonDecode(request.body) as Map<String, dynamic>;
+          final instructions =
+              body['systemInstruction']['parts'][0]['text'] as String;
+          expect(instructions, contains('Output Markdown syntax only'));
+          expect(instructions, contains('never HTML'));
+          final event = jsonEncode({
+            'candidates': [
+              {
+                'content': {
+                  'parts': [
+                    {
+                      'text':
+                          '<p>Hello <strong>there</strong></p>'
+                          '<ul><li>One</li><li>Two</li></ul>'
+                          '<thought>private reasoning</thought>'
+                          'Okay</thought>'
+                          '\n\n```html\n<p>literal</p>\n```',
+                    },
+                  ],
+                },
+              },
+            ],
+          });
+          return http.Response(
+            'data: $event\n\n',
+            200,
+            headers: {'content-type': 'text/event-stream'},
+          );
+        }),
+      );
+
+      expect(
+        await service.generateReply([_userMessage], onText: updates.add),
+        'Hello **there**\n\n- One\n- Two\n\nOkay\n\n```html\n<p>literal</p>\n```',
+      );
+      expect(updates.every((update) => !update.contains('<thought>')), isTrue);
+      expect(updates.every((update) => !update.contains('</thought>')), isTrue);
+      expect(
+        updates.every((update) => !update.contains('private reasoning')),
+        isTrue,
+      );
+      expect(
+        updates.last,
+        'Hello **there**\n\n- One\n- Two\n\nOkay\n\n```html\n<p>literal</p>\n```',
+      );
+    });
+
     test('asks and remembers a structured clarification', () async {
       SharedPreferences.setMockInitialValues({});
       final preferences = await SharedPreferences.getInstance();
@@ -417,12 +475,17 @@ void main() {
           final declarations =
               (body['tools'][0]['functionDeclarations'] as List)
                   .cast<Map<String, dynamic>>();
+          final searchDescription =
+              declarations.singleWhere(
+                    (declaration) => declaration['name'] == 'search_web',
+                  )['description']
+                  as String;
           expect(
-            declarations.any(
-              (declaration) => declaration['name'] == 'search_web',
-            ),
-            isTrue,
+            searchDescription,
+            contains('requested subject and media type'),
           );
+          expect(searchDescription, contains('3D assets'));
+          expect(searchDescription, contains('if none match'));
           if (geminiRequests == 1) {
             return http.Response(
               'data: {"candidates":[{"content":{"parts":[{"functionCall":'
@@ -558,15 +621,18 @@ void main() {
             final declarations =
                 (body['tools'][0]['functionDeclarations'] as List)
                     .cast<Map<String, dynamic>>();
+            final terminalTool = declarations.singleWhere(
+              (tool) => tool['name'] == 'request_terminal_command',
+            );
             expect(
-              declarations.any(
-                (tool) => tool['name'] == 'request_terminal_command',
-              ),
-              isTrue,
+              terminalTool['description'],
+              contains('Chain dependent steps with &&'),
             );
             final instructions =
                 body['systemInstruction']['parts'][0]['text'] as String;
             expect(instructions, contains('All allow applies only'));
+            expect(instructions, contains('chain dependent steps with &&'));
+            expect(instructions, contains('verification steps'));
             if (requests == 1) {
               return http.Response(
                 'data: {"candidates":[{"content":{"parts":[{"functionCall":'
@@ -820,6 +886,19 @@ void main() {
               instructions,
               contains('NEVER use hyphens or dashes as stylistic connectors'),
             );
+            expect(instructions, contains('do not assume it is a joke'));
+            expect(instructions, contains('do not be combative or defensive'));
+            expect(
+              instructions,
+              contains(
+                'Do not tell the user to sleep solely because it is late',
+              ),
+            );
+            expect(
+              instructions,
+              contains('clearly asks to find an adult video'),
+            );
+            expect(instructions, contains('latest user wording or correction'));
             expect(
               instructions,
               contains('Treat consensual adult conversations about sex'),
@@ -1547,6 +1626,11 @@ void main() {
           summary: 'An active-branch summary.',
           throughMessageId: 'rag-message-0',
           updatedAtUtc: 1,
+          backgroundState: {
+            'open_threads': [
+              'shared_interest: User is curious about unusual sky phenomena.',
+            ],
+          },
         ),
         embeddings: const [],
         userMemories: [
@@ -1694,9 +1778,22 @@ void main() {
               as Map;
       expect(jsonEncode(memory), contains('historical source marker'));
       expect(jsonEncode(memory), contains('An active-branch summary'));
+      expect(
+        jsonEncode(memory),
+        contains(
+          'shared_interest: User is curious about unusual sky phenomena.',
+        ),
+      );
       expect(jsonEncode(memory), contains('Prefers blue notebooks.'));
       expect(jsonEncode(memory), isNot(contains('inactive')));
       expect(jsonEncode(memory), isNot(contains('Expired temporary state.')));
+      final replyInstructions =
+          ((chatRequest!['systemInstruction'] as Map)['parts'] as List)
+                  .single['text']
+              as String;
+      expect(replyInstructions, contains('optional, fallible signals'));
+      expect(replyInstructions, contains('at most one open thread'));
+      expect(replyInstructions, contains('instead of derailing the reply'));
       expect(
         latestParts.whereType<Map>().any((part) {
           final text = part['text'];
@@ -1849,7 +1946,7 @@ void main() {
                     'parts': [
                       {
                         'text':
-                            'Summary follows:\n```json\n{"title":"Topic","summary":"Three exchanges summarized.","intent":"Continue the topic.","open_threads":[],"memories":[{"kind":"habit","key":"plans_with_notes","content":"Often uses notes to plan ideas.","confidence":0.8,"source_message_ids":["batch-user-0","batch-user-2"],"expires_in_days":null},{"kind":"wellbeing","key":"current_state","content":"Had a hard day recently.","confidence":0.7,"source_message_ids":["unknown-id","batch-user-1"],"expires_in_days":14.0}],"resolved_memories":[{"kind":"follow_up","key":"choose_notebook_size"}],"proactive_message":null,"proactive_confidence":0}\n```\n',
+                            'Summary follows:\n```json\n{"title":"Topic","summary":"Three exchanges summarized.","intent":"Continue the topic.","open_threads":["shared_interest: User is curious about unusual sky phenomena."],"memories":[{"kind":"habit","key":"plans_with_notes","content":"Often uses notes to plan ideas.","confidence":0.8,"source_message_ids":["batch-user-0","batch-user-2"],"expires_in_days":null},{"kind":"wellbeing","key":"current_state","content":"Had a hard day recently.","confidence":0.7,"source_message_ids":["unknown-id","batch-user-1"],"expires_in_days":14.0}],"resolved_memories":[{"kind":"follow_up","key":"choose_notebook_size"}],"proactive_message":null,"proactive_confidence":0}\n```\n',
                       },
                     ],
                   },
@@ -1894,6 +1991,22 @@ void main() {
                     as String),
               )
               as Map;
+      final thinkerInstructions =
+          ((thinkerBody!['systemInstruction'] as Map)['parts'] as List)
+                  .single['text']
+              as String;
+      expect(thinkerInstructions, contains('unfinished user story'));
+      expect(thinkerInstructions, contains('sustained curiosity'));
+      expect(thinkerInstructions, contains('optional conversational leads'));
+      expect(thinkerInstructions, contains('not unsolicited messages'));
+      expect(
+        thinkerInstructions,
+        contains('if unclear, set intent to an empty string'),
+      );
+      expect(
+        thinkerInstructions,
+        contains('latest user correction supersedes'),
+      );
       expect(thinkerContext['new_exchanges'], hasLength(6));
       expect(await store.loadConversationMemoryJobs(), isEmpty);
       final savedMemories = await store.loadUserMemories();
@@ -1910,10 +2023,11 @@ void main() {
       );
       expect(savedWellbeing.sourceMessageIds, [exchanges[1].$1.id]);
       expect(savedWellbeing.expiresAtUtc, isNotNull);
-      expect(
-        (await store.loadConversationTopicSummaries()).single.throughMessageId,
-        exchanges.last.$2.id,
-      );
+      final savedTopic = (await store.loadConversationTopicSummaries()).single;
+      expect(savedTopic.throughMessageId, exchanges.last.$2.id);
+      expect(savedTopic.backgroundState['open_threads'], [
+        'shared_interest: User is curious about unusual sky phenomena.',
+      ]);
     });
 
     test('reports truncated Gemini memory responses explicitly', () async {
@@ -1982,6 +2096,156 @@ void main() {
       expect(await store.loadConversationMemoryJobs(), hasLength(1));
       expect(await store.loadConversationTopicSummaries(), isEmpty);
     });
+
+    test(
+      'skips a blocked memory batch and continues with later exchanges',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final preferences = await SharedPreferences.getInstance();
+        final directory = await Directory.systemTemp.createTemp(
+          'sara-rag-blocked-',
+        );
+        final store = await SqliteMessageStore.openAtPath(
+          path.join(directory.path, 'message.sql'),
+        );
+        addTearDown(() async {
+          await store.close();
+          await directory.delete(recursive: true);
+        });
+        final previousUser = _message(id: 'previous-user', createdAtUtc: 1);
+        final previousModel = _message(
+          id: 'previous-model',
+          role: 'model',
+          createdAtUtc: 2,
+          parentMessageId: previousUser.id,
+        );
+        final user = _message(
+          id: 'blocked-user',
+          createdAtUtc: 3,
+          parentMessageId: previousModel.id,
+        );
+        final model = _message(
+          id: 'blocked-model',
+          role: 'model',
+          createdAtUtc: 4,
+          parentMessageId: user.id,
+        );
+        final nextUser = _message(
+          id: 'next-user',
+          createdAtUtc: 5,
+          parentMessageId: model.id,
+        );
+        final nextModel = _message(
+          id: 'next-model',
+          role: 'model',
+          createdAtUtc: 6,
+          parentMessageId: nextUser.id,
+        );
+        await store.saveExchange([
+          previousUser,
+          previousModel,
+          user,
+          model,
+          nextUser,
+          nextModel,
+        ]);
+        await store.saveConversationMemory(
+          topic: ConversationTopicSummary(
+            id: 'previous-topic',
+            title: 'Existing topic',
+            summary: 'Previously saved summary.',
+            throughMessageId: previousModel.id,
+            updatedAtUtc: 2,
+          ),
+          embeddings: const [],
+          userMemories: [
+            UserMemoryRecord(
+              id: 'previous-memory',
+              kind: 'preference',
+              memoryKey: 'notebook_color',
+              content: 'Prefers blue notebooks.',
+              confidence: 0.9,
+              sourceMessageIds: [previousUser.id],
+              createdAtUtc: 1,
+              updatedAtUtc: 2,
+              embeddingModel: LocalE5EmbeddingProvider.modelId,
+              embedding: const [1, 0],
+            ),
+          ],
+        );
+        final config = _MemoryAiConfigStore()
+          ..apiKeys = ['blocked-key']
+          ..values['ai_model'] = 'gemini-3.5-flash-lite';
+        var thinkerRequests = 0;
+        Object? backgroundError;
+        final service = ConversationRagService(
+          messageStore: store,
+          configStore: config,
+          preferences: preferences,
+          embeddingProvider: const _FixedEmbeddingProvider(),
+          onBackgroundError: (error) => backgroundError = error,
+          client: MockClient((_) async {
+            thinkerRequests++;
+            return http.Response(
+              jsonEncode(
+                thinkerRequests == 1
+                    ? {
+                        'promptFeedback': {'blockReason': 'SAFETY'},
+                      }
+                    : {
+                        'candidates': [
+                          {
+                            'content': {
+                              'parts': [
+                                {
+                                  'text':
+                                      '{"title":"Updated topic","summary":"Updated summary.","intent":"","open_threads":[],"memories":[],"resolved_memories":[],"proactive_message":null,"proactive_confidence":0}',
+                                },
+                              ],
+                            },
+                          },
+                        ],
+                      },
+              ),
+              200,
+            );
+          }),
+        );
+        addTearDown(service.dispose);
+
+        await service.saveExchangeMemory(
+          context: const ConversationRagContext(),
+          userMessage: user,
+          modelMessage: model,
+        );
+        expect(await store.loadConversationMemoryJobs(), isEmpty);
+        expect(await store.loadConversationTopicSummaries(), hasLength(1));
+        expect(
+          (await store.loadConversationTopicSummaries()).single.summary,
+          'Previously saved summary.',
+        );
+        expect(
+          (await store.loadUserMemories()).single.content,
+          'Prefers blue notebooks.',
+        );
+
+        await service.saveExchangeMemory(
+          context: const ConversationRagContext(),
+          userMessage: nextUser,
+          modelMessage: nextModel,
+        );
+
+        expect(backgroundError, isNull);
+        expect(thinkerRequests, 2);
+        expect(await store.loadConversationMemoryJobs(), isEmpty);
+        expect(
+          (await store.loadConversationTopicSummaries()).any(
+            (topic) => topic.summary == 'Updated summary.',
+          ),
+          isTrue,
+        );
+      },
+    );
 
     test(
       'resumes a full persistent thinker batch after reopening SQLite',

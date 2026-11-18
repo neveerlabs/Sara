@@ -6987,6 +6987,62 @@ String _messageContentWithoutSearchSources(String content) {
       : content.substring(0, headingMatch.start).trimRight();
 }
 
+String? _clarificationAnswerForDisplay(
+  ChatMessage message,
+  ChatMessage? parentMessage,
+) {
+  if (message.role != 'user' || parentMessage?.id != message.parentMessageId) {
+    return null;
+  }
+  final clarification = parentMessage?.clarification;
+  if (clarification == null || !clarification.isComplete) return null;
+
+  final answers = <String>[];
+  final submittedPairs = <String>[];
+  for (final entry in clarification.questions.asMap().entries) {
+    final answer = clarification.answerAt(entry.key);
+    if (answer == null) return null;
+    answers.add(answer);
+    submittedPairs.add('${entry.value.question}\n$answer');
+  }
+  if (submittedPairs.join('\n\n') != message.content) return null;
+  return answers.join('\n');
+}
+
+class _ClarificationSummary {
+  const _ClarificationSummary({required this.questions, required this.answers});
+
+  final List<ClarificationQuestion> questions;
+  final List<String> answers;
+}
+
+_ClarificationSummary? _completedClarificationSummary(
+  ChatMessage clarificationMessage,
+  ChatMessage answerMessage,
+) {
+  if (clarificationMessage.role != 'model' ||
+      clarificationMessage.id != answerMessage.parentMessageId ||
+      answerMessage.role != 'user') {
+    return null;
+  }
+  final clarification = clarificationMessage.clarification;
+  if (clarification == null || !clarification.isComplete) return null;
+
+  final answers = <String>[];
+  final submittedPairs = <String>[];
+  for (final entry in clarification.questions.asMap().entries) {
+    final answer = clarification.answerAt(entry.key);
+    if (answer == null) return null;
+    answers.add(answer);
+    submittedPairs.add('${entry.value.question}\n$answer');
+  }
+  if (submittedPairs.join('\n\n') != answerMessage.content) return null;
+  return _ClarificationSummary(
+    questions: clarification.questions,
+    answers: List.unmodifiable(answers),
+  );
+}
+
 class _ConversationView extends StatelessWidget {
   const _ConversationView({
     required this.messages,
@@ -7123,6 +7179,9 @@ class _ConversationView extends StatelessWidget {
                         );
                       }
                       final message = messages[index];
+                      if (_isCompletedClarificationPair(messages, index)) {
+                        return const SizedBox.shrink();
+                      }
                       final clarificationAnswer =
                           message.clarification != null &&
                               index + 1 < messages.length &&
@@ -7140,6 +7199,8 @@ class _ConversationView extends StatelessWidget {
                       final canReactToMessage =
                           message.role == 'model' &&
                           feedbackUserMessageId != null;
+                      final clarificationSummary =
+                          _clarificationSummaryForReply(messages, index);
                       return Center(
                         child: ConstrainedBox(
                           constraints: const BoxConstraints(maxWidth: 760),
@@ -7148,6 +7209,12 @@ class _ConversationView extends StatelessWidget {
                             child: _MessageRow(
                               key: ValueKey(message.id),
                               message: message,
+                              clarificationSummary: clarificationSummary,
+                              displayUserContent:
+                                  _clarificationAnswerForDisplay(
+                                    message,
+                                    index == 0 ? null : messages[index - 1],
+                                  ),
                               linkPreviewService: linkPreviewService,
                               onOpenLink: onOpenLink,
                               clarificationAnswer: clarificationAnswer,
@@ -7246,6 +7313,46 @@ class _ConversationView extends StatelessWidget {
     }
     return null;
   }
+
+  bool _isCompletedClarificationPair(List<ChatMessage> messages, int index) {
+    if (index + 2 < messages.length) {
+      final clarificationMessage = messages[index];
+      final answerMessage = messages[index + 1];
+      final replyMessage = messages[index + 2];
+      if (_completedClarificationSummary(clarificationMessage, answerMessage) !=
+              null &&
+          replyMessage.role == 'model' &&
+          replyMessage.parentMessageId == answerMessage.id) {
+        return true;
+      }
+    }
+    if (index == 0 || index + 1 >= messages.length) return false;
+    final clarificationMessage = messages[index - 1];
+    final answerMessage = messages[index];
+    final replyMessage = messages[index + 1];
+    return _completedClarificationSummary(
+              clarificationMessage,
+              answerMessage,
+            ) !=
+            null &&
+        replyMessage.role == 'model' &&
+        replyMessage.parentMessageId == answerMessage.id;
+  }
+
+  _ClarificationSummary? _clarificationSummaryForReply(
+    List<ChatMessage> messages,
+    int index,
+  ) {
+    if (index < 2) return null;
+    final replyMessage = messages[index];
+    final clarificationMessage = messages[index - 2];
+    final answerMessage = messages[index - 1];
+    if (replyMessage.role != 'model' ||
+        replyMessage.parentMessageId != answerMessage.id) {
+      return null;
+    }
+    return _completedClarificationSummary(clarificationMessage, answerMessage);
+  }
 }
 
 class _PendingTerminalCommandApproval {
@@ -7333,6 +7440,180 @@ class _TerminalActivityDisclosure extends StatelessWidget {
                       ) ...[
                         if (index > 0) const Divider(height: 1, color: _border),
                         _TerminalActivityItem(activity: activities[index]),
+                      ],
+                    ],
+                  ),
+                )
+              : const SizedBox.shrink(),
+        ),
+      ],
+    );
+  }
+}
+
+class _ClarificationDisclosure extends StatelessWidget {
+  const _ClarificationDisclosure({
+    required this.summary,
+    required this.questionIndex,
+    required this.expanded,
+    required this.onToggle,
+    required this.onQuestionChanged,
+  });
+
+  final _ClarificationSummary summary;
+  final int questionIndex;
+  final bool expanded;
+  final VoidCallback onToggle;
+  final ValueChanged<int> onQuestionChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        InkWell(
+          key: const ValueKey('clarification-disclosure-toggle'),
+          onTap: onToggle,
+          borderRadius: BorderRadius.circular(4),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Flexible(
+                  child: Text(
+                    appText(
+                      'Clarification: {question}',
+                      values: {'question': summary.questions.first.question},
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: _muted,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 3),
+                CustomPaint(
+                  key: ValueKey(
+                    expanded
+                        ? 'clarification-disclosure-arrow-down'
+                        : 'clarification-disclosure-arrow-right',
+                  ),
+                  size: const Size(14, 14),
+                  painter: _TerminalDisclosureArrow(
+                    expanded: expanded,
+                    color: _muted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 150),
+          alignment: Alignment.topLeft,
+          child: expanded
+              ? Container(
+                  key: const ValueKey('clarification-disclosure-content'),
+                  width: double.infinity,
+                  constraints: const BoxConstraints(maxWidth: 760),
+                  padding: const EdgeInsets.fromLTRB(12, 9, 12, 6),
+                  decoration: BoxDecoration(
+                    color: _surface,
+                    border: Border.all(color: _border),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Column(
+                    key: const ValueKey('clarification-summary-card'),
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        summary.questions[questionIndex].question,
+                        style: const TextStyle(
+                          color: _text,
+                          fontSize: 15,
+                          height: 1.35,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Container(
+                        key: ValueKey(
+                          'clarification-summary-answer-$questionIndex',
+                        ),
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 9,
+                          vertical: 7,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _surfaceRaised,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          appText(
+                            'Your answer: {answer}',
+                            values: {'answer': summary.answers[questionIndex]},
+                          ),
+                          style: const TextStyle(
+                            color: _text,
+                            fontSize: 12,
+                            height: 1.35,
+                          ),
+                        ),
+                      ),
+                      if (summary.questions.length > 1) ...[
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            TextButton.icon(
+                              key: const ValueKey(
+                                'clarification-summary-previous',
+                              ),
+                              onPressed: questionIndex == 0
+                                  ? null
+                                  : () => onQuestionChanged(questionIndex - 1),
+                              style: TextButton.styleFrom(
+                                foregroundColor: _text,
+                                minimumSize: const Size(0, 30),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 4,
+                                ),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              icon: const Icon(Icons.chevron_left, size: 18),
+                              label: Text(appText('Previous question')),
+                            ),
+                            const Spacer(),
+                            TextButton(
+                              key: const ValueKey('clarification-summary-next'),
+                              onPressed:
+                                  questionIndex >= summary.questions.length - 1
+                                  ? null
+                                  : () => onQuestionChanged(questionIndex + 1),
+                              style: TextButton.styleFrom(
+                                foregroundColor: _text,
+                                minimumSize: const Size(0, 30),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 4,
+                                ),
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(appText('Next question')),
+                                  const SizedBox(width: 2),
+                                  const Icon(Icons.chevron_right, size: 18),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
                       ],
                     ],
                   ),
@@ -7748,6 +8029,8 @@ class _MessageRow extends StatefulWidget {
   const _MessageRow({
     super.key,
     required this.message,
+    required this.clarificationSummary,
+    required this.displayUserContent,
     required this.linkPreviewService,
     required this.onOpenLink,
     required this.clarificationAnswer,
@@ -7783,6 +8066,8 @@ class _MessageRow extends StatefulWidget {
   });
 
   final ChatMessage message;
+  final _ClarificationSummary? clarificationSummary;
+  final String? displayUserContent;
   final LinkPreviewService linkPreviewService;
   final Future<void> Function(String href) onOpenLink;
   final String? clarificationAnswer;
@@ -7843,6 +8128,8 @@ class _MessageRow extends StatefulWidget {
 
 class _MessageRowState extends State<_MessageRow> {
   bool _isCopied = false;
+  bool _isClarificationExpanded = false;
+  int _clarificationSummaryQuestionIndex = 0;
   bool _isHovered = false;
   bool _isEditing = false;
   bool _terminalActivityExpanded = false;
@@ -7870,6 +8157,11 @@ class _MessageRowState extends State<_MessageRow> {
     }
     if (oldWidget.message.id != widget.message.id) {
       _isEditing = false;
+      _clarificationSummaryQuestionIndex = 0;
+    }
+    if (_clarificationSummaryQuestionIndex >=
+        (widget.clarificationSummary?.questions.length ?? 0)) {
+      _clarificationSummaryQuestionIndex = 0;
     }
   }
 
@@ -8123,16 +8415,17 @@ class _MessageRowState extends State<_MessageRow> {
     final displayContent = hasSearchResultsButton
         ? _messageContentWithoutSearchSources(message.content)
         : message.content;
+    final userDisplayContent = widget.displayUserContent ?? message.content;
     final emojiOnlyMessage = widget.attachments.isEmpty
-        ? _singleEmoji(message.content)
+        ? _singleEmoji(userDisplayContent)
         : null;
     final isPlainShortUserMessage =
         message.role == 'user' &&
-        message.content.trim().isNotEmpty &&
-        message.content.runes.length <= 24 &&
-        !message.content.contains('\n') &&
+        userDisplayContent.trim().isNotEmpty &&
+        userDisplayContent.runes.length <= 24 &&
+        !userDisplayContent.contains('\n') &&
         messageWebUris.isEmpty &&
-        !RegExp(r'[`*_~#\[\]()>|]').hasMatch(message.content);
+        !RegExp(r'[`*_~#\[\]()>|]').hasMatch(userDisplayContent);
     final waitingForTerminalReply =
         message.role == 'model' &&
         message.content.trim().isEmpty &&
@@ -8238,7 +8531,7 @@ class _MessageRowState extends State<_MessageRow> {
                                         )
                                       : isPlainShortUserMessage
                                       ? SelectableText(
-                                          message.content,
+                                          userDisplayContent,
                                           key: ValueKey(
                                             'user-message-plain-text-${message.id}',
                                           ),
@@ -8250,7 +8543,10 @@ class _MessageRowState extends State<_MessageRow> {
                                           ),
                                         )
                                       : MarkdownBody(
-                                          data: message.content,
+                                          key: ValueKey(
+                                            'user-message-content-${message.id}',
+                                          ),
+                                          data: userDisplayContent,
                                           selectable: true,
                                           inlineSyntaxes: [
                                             _EmojiMarkdownSyntax(),
@@ -8540,6 +8836,19 @@ class _MessageRowState extends State<_MessageRow> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (widget.clarificationSummary != null) ...[
+              _ClarificationDisclosure(
+                summary: widget.clarificationSummary!,
+                questionIndex: _clarificationSummaryQuestionIndex,
+                expanded: _isClarificationExpanded,
+                onToggle: () => setState(
+                  () => _isClarificationExpanded = !_isClarificationExpanded,
+                ),
+                onQuestionChanged: (index) =>
+                    setState(() => _clarificationSummaryQuestionIndex = index),
+              ),
+              const SizedBox(height: 4),
+            ],
             if (message.role == 'model' &&
                 widget.terminalActivities.isNotEmpty) ...[
               _TerminalActivityDisclosure(

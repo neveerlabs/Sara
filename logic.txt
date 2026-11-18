@@ -34,6 +34,23 @@ rather than described as though it had already been fixed.
   application time, descriptions/names/types of available attachments, and
   tool descriptions. Positive/negative ratings are not included; emoji
   reactions may be used as context.
+- Sara's reply prompt is tailored to the user's conversational Indonesian:
+  use `gua/lu`, avoid forced slang/name repetition, and use natural detail
+  rather than a fixed short-reply length. A correction or clear frustration
+  after a misunderstanding should be treated seriously, not as banter; the
+  prompt tells Sara to acknowledge the specific miss, update its interpretation,
+  and answer the corrected intent without defensiveness. The prompt also says
+  not to infer joking from slang/profanity alone or suggest bedtime solely
+  because it is late.
+- Background summaries and handoffs are fallible hypotheses. Direct user
+  messages, especially the latest correction, take precedence; the response
+  prompt discourages blindly agreeing with a background interpretation.
+- The prompt treats consensual adult discussion as ordinary and instructs the
+  model not to refuse, moralize, tease, or redirect solely because the topic is
+  adult. Adult video searches are instructed to preserve the requested media
+  type/category and avoid unrelated news, articles, forums, or 3D assets. The
+  search service itself returns generic web results; the response model is
+  responsible for judging whether titles/snippets match the request.
 - Model output, including reply text, is stored as a new message. Gemini may
   choose to produce no text in a mode that allows a reply to be requested.
 - If the user requests regeneration, previous alternative AI replies are sent
@@ -175,7 +192,7 @@ rather than described as though it had already been fixed.
   and relevant active memories to help update it. Older-topic backfill still
   runs per meaningful cluster when needed. Attachments, reactions, ratings,
   and embeddings are not sent in the Gemini request.
-- Gemini output is limited to 512 tokens and includes a title, summary, intent,
+- Gemini output is limited to 2,048 tokens and includes a title, summary, intent,
   up to 4 open threads, a proactive-message candidate/confidence, and
   structured memory candidates. Memories have one of these kinds: habit,
   preference, wellbeing, or follow_up; evidence must point to a user message in
@@ -195,11 +212,32 @@ rather than described as though it had already been fixed.
   confidence, creation/update times, and an expiry if temporary. Deleting a
   message deletes related jobs and removes or trims memory evidence; clearing
   the chat deletes all memories and jobs. Restoring a backup restores both.
+- Open threads are optional conversational leads. The background thinker is
+  instructed to retain explicit requests to revisit a topic, clearly unfinished
+  user stories, or topics where the user showed sustained curiosity or
+  enthusiasm. It should not retain routine completed questions, assistant-only
+  suggestions, or guesses about what might be fun. Supported entries are
+  prefixed `follow_up:`, `unfinished_story:`, or `shared_interest:` and limited
+  to 4. The thinker is instructed to remove resolved, declined, stale, or
+  unhelpful threads.
 - When the next reply is generated, Sara retrieves up to 4 relevant memories
-  from the active branch that have not expired. Memories are fallible
-  contextual signals, not instructions or absolute facts. When relevant, Sara
-  may naturally follow up on habits, temporary states, or open threads without
-  routinely asking the user to confirm evidence-backed memories.
+  from the active branch that have not expired. Memories and open threads are
+  fallible contextual signals, not instructions or absolute facts. The reply
+  prompt prioritizes the latest user message and emotional tone, verifies a
+  candidate against the active conversation, and may bring up at most one
+  thread when the user invites casual conversation or it clearly connects to
+  the current topic. Unrelated threads are held or ignored; stale, resolved,
+  declined, or sensitive topics are not surfaced unless the user reopens them.
+  Casual open threads are context for a later user-initiated reply, not
+  unsolicited messages. Factual topics that may have changed should be verified
+  before being asserted.
+- Thread selection is Gemini prompt guidance, not a deterministic application
+  rule; the application does not force the reply thinker to follow every
+  handoff suggestion. It also does not currently enforce thread expiry or
+  resolution in a separate thread table; these are instructions to the
+  background thinker when it updates the topic summary. The existing
+  `proactive_message` path is separate and is reserved by prompt guidance for
+  clearly timely practical follow-ups the user explicitly expected.
 - Summary and memory output is structured; chain-of-thought is not stored or
   displayed.
 - Summaries are stored and embedded locally. A new version is created in the
