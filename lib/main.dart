@@ -36,6 +36,7 @@ import 'ai_config_store.dart';
 import 'web_search_service.dart';
 import 'app_localizations.dart';
 import 'attachment_file_policy.dart';
+import 'attachment_storage.dart';
 import 'camera_capture.dart';
 import 'camera_capture_cache.dart';
 import 'chat_attachment.dart';
@@ -50,6 +51,8 @@ import 'sara_backup.dart';
 import 'smart_text_input_formatter.dart';
 import 'sound_of_text_service.dart';
 import 'terminal_command.dart';
+
+final _defaultAttachmentStorage = AttachmentStorage();
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -504,6 +507,7 @@ class SaraApp extends StatefulWidget {
     this.cameraSessionFactory,
     this.cameraImageSaver,
     this.cameraCacheCleaner,
+    this.attachmentStorage,
     this.notificationService,
     this.notificationSoundPlayer,
     this.linkPreviewService,
@@ -521,6 +525,7 @@ class SaraApp extends StatefulWidget {
   final CameraSessionFactory? cameraSessionFactory;
   final Future<ChatAttachment> Function(Uint8List bytes)? cameraImageSaver;
   final Future<void> Function(MessageStore messageStore)? cameraCacheCleaner;
+  final AttachmentStorage? attachmentStorage;
   final DesktopNotificationService? notificationService;
   final Future<void> Function(String assetPath)? notificationSoundPlayer;
   final LinkPreviewService? linkPreviewService;
@@ -608,6 +613,7 @@ class _SaraAppState extends State<SaraApp> {
           cameraSessionFactory: widget.cameraSessionFactory,
           cameraImageSaver: widget.cameraImageSaver,
           cameraCacheCleaner: widget.cameraCacheCleaner,
+          attachmentStorage: widget.attachmentStorage,
           notificationService: widget.notificationService,
           notificationSoundPlayer: widget.notificationSoundPlayer,
           linkPreviewService: widget.linkPreviewService,
@@ -632,6 +638,7 @@ class ChatPage extends StatefulWidget {
     this.cameraSessionFactory,
     this.cameraImageSaver,
     this.cameraCacheCleaner,
+    this.attachmentStorage,
     this.notificationService,
     this.notificationSoundPlayer,
     this.linkPreviewService,
@@ -649,6 +656,7 @@ class ChatPage extends StatefulWidget {
   final CameraSessionFactory? cameraSessionFactory;
   final Future<ChatAttachment> Function(Uint8List bytes)? cameraImageSaver;
   final Future<void> Function(MessageStore messageStore)? cameraCacheCleaner;
+  final AttachmentStorage? attachmentStorage;
   final DesktopNotificationService? notificationService;
   final Future<void> Function(String assetPath)? notificationSoundPlayer;
   final LinkPreviewService? linkPreviewService;
@@ -704,6 +712,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   bool _isDraggingFiles = false;
   bool _isErrorNotificationPanelOpen = false;
   String? _selectedErrorNotificationId;
+  String? _copiedErrorNotificationId;
+  Timer? _copiedErrorNotificationTimer;
   bool _hasStreamedReply = false;
   bool _showScrollToBottom = false;
   bool _followLatestDuringStreaming = true;
@@ -743,6 +753,8 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
     _activeToastTimer?.cancel();
     _activeToastTimer = null;
+    _copiedErrorNotificationTimer?.cancel();
+    _copiedErrorNotificationTimer = null;
     if (_activeToast?.mounted ?? false) _activeToast!.remove();
     _activeToast = null;
     _messageController.dispose();
@@ -1220,38 +1232,86 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
   Future<void> _expireStoredAttachments(MessageStore messageStore) async {
     final nowUtc = DateTime.now().toUtc().millisecondsSinceEpoch;
     final expired = await messageStore.loadExpiredAttachments(nowUtc);
-    if (expired.isEmpty) return;
-    final expiredClipboard = expired
-        .where((item) => item.isClipboardCopy)
+    final expiredManaged = expired
+        .where((item) => item.isAppManagedCopy)
         .toList(growable: false);
-    if (expiredClipboard.isNotEmpty) {
-      final supportDirectory = await getApplicationSupportDirectory();
-      final clipboardDirectory = path.normalize(
-        path.absolute(
-          path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
-        ),
+    final attachmentStorage =
+        widget.attachmentStorage ?? _defaultAttachmentStorage;
+    if (expiredManaged.isNotEmpty) {
+      final attachmentDirectory = path.normalize(
+        path.absolute(await attachmentStorage.directoryPath()),
       );
-      for (final attachment in expiredClipboard) {
+      final supportDirectory = await getApplicationSupportDirectory();
+      final managedDirectories = {
+        attachmentDirectory,
+        path.normalize(
+          path.absolute(
+            path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
+          ),
+        ),
+        path.normalize(
+          path.absolute(
+            path.join(supportDirectory.path, 'Sara', 'camera-attachments'),
+          ),
+        ),
+      };
+      final pathsToDelete = <String>[];
+      for (final attachment in expiredManaged) {
         final filePath = attachment.path;
         if (filePath == null) continue;
         final absoluteFilePath = path.normalize(path.absolute(filePath));
-        if (!path.isWithin(clipboardDirectory, absoluteFilePath)) {
+        if (!managedDirectories.any(
+          (directory) => path.isWithin(directory, absoluteFilePath),
+        )) {
+          final cacheDirectory = await getApplicationCacheDirectory();
+          final cachedCameraDirectory = path.normalize(
+            path.absolute(
+              path.join(cacheDirectory.path, 'Sara', 'camera-attachments'),
+            ),
+          );
+          managedDirectories.add(cachedCameraDirectory);
+        }
+        if (!managedDirectories.any(
+          (directory) => path.isWithin(directory, absoluteFilePath),
+        )) {
           throw StateError(
-            'Refusing to delete clipboard attachment outside the app folder.',
+            'Refusing to delete an attachment outside Sara storage.',
           );
         }
-        final file = File(absoluteFilePath);
+        pathsToDelete.add(absoluteFilePath);
+      }
+      await attachmentStorage.deleteManagedFiles(
+        pathsToDelete.where(
+          (filePath) => path.isWithin(attachmentDirectory, filePath),
+        ),
+      );
+      for (final filePath in pathsToDelete.where(
+        (filePath) => !path.isWithin(attachmentDirectory, filePath),
+      )) {
+        final file = File(filePath);
         if (await file.exists()) await file.delete();
       }
     }
-    await messageStore.expireAttachments(nowUtc);
+    if (expired.isNotEmpty) {
+      await messageStore.expireAttachments(nowUtc);
+    }
     final refreshedAttachments = await messageStore.loadAttachments();
-    if (!mounted) return;
-    setState(() {
-      _attachmentsByMessage
-        ..clear()
-        ..addAll(refreshedAttachments);
-    });
+    final retainedPaths = refreshedAttachments.values
+        .expand((items) => items)
+        .where((item) => item.isAppManagedCopy && item.path != null)
+        .map((item) => path.normalize(path.absolute(item.path!)))
+        .toSet();
+    await attachmentStorage.deleteExpiredOrphans(
+      nowUtc: nowUtc,
+      retainedPaths: retainedPaths,
+    );
+    if (expired.isNotEmpty && mounted) {
+      setState(() {
+        _attachmentsByMessage
+          ..clear()
+          ..addAll(refreshedAttachments);
+      });
+    }
   }
 
   Future<void> _clearCameraCaptureCache(MessageStore messageStore) async {
@@ -1603,86 +1663,24 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     List<ChatAttachment> attachments,
   ) async {
     if (attachments.isEmpty) return const [];
-    final clipboardAttachments = attachments
-        .where(
-          (attachment) => attachment.isClipboardCopy && attachment.path != null,
-        )
-        .toList(growable: false);
-    if (clipboardAttachments.isEmpty) {
-      return attachments
-          .map(
-            (attachment) => ChatAttachment(
-              id: _uuid.v4(),
-              path: attachment.path,
-              name: attachment.name,
-              mimeType: attachment.mimeType,
-              expiresAtUtc: attachment.expiresAtUtc,
-              isClipboardCopy: attachment.isClipboardCopy,
-            ),
-          )
-          .toList(growable: false);
-    }
-    final supportDirectory = await getApplicationSupportDirectory();
-    final cacheDirectory = await getApplicationCacheDirectory();
-    final clipboardDirectory = path.normalize(
-      path.absolute(
-        path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
-      ),
-    );
-    final cameraDirectory = path.normalize(
-      path.absolute(
-        path.join(cacheDirectory.path, 'Sara', 'camera-attachments'),
-      ),
-    );
-    final legacyCameraDirectory = path.normalize(
-      path.absolute(
-        path.join(supportDirectory.path, 'Sara', 'camera-attachments'),
-      ),
-    );
-    final copiedFiles = <File>[];
+    final attachmentStorage =
+        widget.attachmentStorage ?? _defaultAttachmentStorage;
+    final copiedPaths = <String>[];
     try {
       final result = <ChatAttachment>[];
       for (final attachment in attachments) {
-        var attachmentPath = attachment.path;
-        if (attachment.isClipboardCopy && attachmentPath != null) {
-          final sourcePath = path.normalize(path.absolute(attachmentPath));
-          if (!path.isWithin(clipboardDirectory, sourcePath) &&
-              !path.isWithin(cameraDirectory, sourcePath) &&
-              !path.isWithin(legacyCameraDirectory, sourcePath)) {
-            throw StateError(
-              'Refusing to duplicate an app-managed attachment outside the app folder.',
-            );
-          }
-          final sourceFile = File(sourcePath);
-          if (await sourceFile.exists()) {
-            await Directory(clipboardDirectory).create(recursive: true);
-            attachmentPath = path.join(
-              clipboardDirectory,
-              '${_uuid.v4()}${path.extension(sourcePath)}',
-            );
-            final copiedFile = await sourceFile.copy(attachmentPath);
-            copiedFiles.add(copiedFile);
-          } else {
-            attachmentPath = null;
-          }
+        final copied = await attachmentStorage.copyAttachment(attachment);
+        result.add(copied);
+        if (copied.path != null && copied.isAppManagedCopy) {
+          copiedPaths.add(copied.path!);
         }
-        result.add(
-          ChatAttachment(
-            id: _uuid.v4(),
-            path: attachmentPath,
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            expiresAtUtc: attachment.expiresAtUtc,
-            isClipboardCopy: attachment.isClipboardCopy,
-          ),
-        );
       }
       return result;
     } catch (error) {
       final cleanupErrors = <Object>[];
-      for (final file in copiedFiles) {
+      for (final filePath in copiedPaths) {
         try {
-          if (await file.exists()) await file.delete();
+          await attachmentStorage.deleteManagedFiles([filePath]);
         } catch (cleanupError) {
           cleanupErrors.add(cleanupError);
         }
@@ -1836,7 +1834,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
     final clipboardAttachments = ids
         .expand((id) => _attachmentsByMessage[id] ?? const <ChatAttachment>[])
-        .where((attachment) => attachment.isClipboardCopy)
+        .where((attachment) => attachment.isAppManagedCopy)
         .toList(growable: false);
     try {
       await messageStore.deleteMessages(ids);
@@ -2675,7 +2673,19 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     final notification = _errorNotifications[index];
     try {
       await Clipboard.setData(ClipboardData(text: notification.message));
-      if (mounted) _showMessage(appText('Error copied'), isError: false);
+      if (mounted) {
+        _copiedErrorNotificationTimer?.cancel();
+        setState(() => _copiedErrorNotificationId = id);
+        _copiedErrorNotificationTimer = Timer(
+          const Duration(milliseconds: 1200),
+          () {
+            if (!mounted) return;
+            setState(() => _copiedErrorNotificationId = null);
+            _copiedErrorNotificationTimer = null;
+          },
+        );
+        _showMessage(appText('Error copied'), isError: false);
+      }
     } catch (error) {
       if (mounted) {
         _showMessage(
@@ -2885,7 +2895,7 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     }
     final clipboardAttachments = _attachmentsByMessage.values
         .expand((attachments) => attachments)
-        .where((attachment) => attachment.isClipboardCopy)
+        .where((attachment) => attachment.isAppManagedCopy)
         .toList(growable: false);
     try {
       await messageStore.clearMessages();
@@ -2936,15 +2946,15 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     if (paths.isEmpty) return;
 
     final supportDirectory = await getApplicationSupportDirectory();
-    final cacheDirectory = await getApplicationCacheDirectory();
+    final attachmentDirectory = path.normalize(
+      path.absolute(
+        await (widget.attachmentStorage ?? _defaultAttachmentStorage)
+            .directoryPath(),
+      ),
+    );
     final clipboardDirectory = path.normalize(
       path.absolute(
         path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
-      ),
-    );
-    final cameraDirectory = path.normalize(
-      path.absolute(
-        path.join(cacheDirectory.path, 'Sara', 'camera-attachments'),
       ),
     );
     final legacyCameraDirectory = path.normalize(
@@ -2955,15 +2965,31 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
     final failures = <String>[];
     for (final filePath in paths) {
       final absoluteFilePath = path.normalize(path.absolute(filePath));
-      if (!path.isWithin(clipboardDirectory, absoluteFilePath) &&
-          !path.isWithin(cameraDirectory, absoluteFilePath) &&
-          !path.isWithin(legacyCameraDirectory, absoluteFilePath)) {
+      var isManagedPath =
+          path.isWithin(attachmentDirectory, absoluteFilePath) ||
+          path.isWithin(clipboardDirectory, absoluteFilePath) ||
+          path.isWithin(legacyCameraDirectory, absoluteFilePath);
+      if (!isManagedPath) {
+        final cacheDirectory = await getApplicationCacheDirectory();
+        final cameraDirectory = path.normalize(
+          path.absolute(
+            path.join(cacheDirectory.path, 'Sara', 'camera-attachments'),
+          ),
+        );
+        isManagedPath = path.isWithin(cameraDirectory, absoluteFilePath);
+      }
+      if (!isManagedPath) {
         failures.add(
           '$filePath: refusing to delete a file outside app-managed folders',
         );
         continue;
       }
       try {
+        if (path.isWithin(attachmentDirectory, absoluteFilePath)) {
+          await (widget.attachmentStorage ?? _defaultAttachmentStorage)
+              .deleteManagedFiles([absoluteFilePath]);
+          continue;
+        }
         final file = File(absoluteFilePath);
         if (await file.exists()) await file.delete();
       } catch (error) {
@@ -3114,6 +3140,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                               ]),
                                               builder: (context, _) => _ConversationView(
                                                 messages: visibleMessages,
+                                                attachmentStorage:
+                                                    widget.attachmentStorage ??
+                                                    _defaultAttachmentStorage,
                                                 linkPreviewService:
                                                     _linkPreviewService,
                                                 onOpenLink:
@@ -3208,6 +3237,9 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                                             widget.clipboardImageReader,
                                         clipboardImageSaver:
                                             widget.clipboardImageSaver,
+                                        attachmentStorage:
+                                            widget.attachmentStorage ??
+                                            _defaultAttachmentStorage,
                                         cameraSessionFactory:
                                             widget.cameraSessionFactory,
                                         cameraImageSaver:
@@ -3279,6 +3311,10 @@ class _ChatPageState extends State<ChatPage> with WidgetsBindingObserver {
                         child: _ErrorNotificationPanel(
                           notifications: _errorNotifications,
                           selectedNotification: selectedErrorNotification,
+                          selectedNotificationCopied:
+                              selectedErrorNotification != null &&
+                              selectedErrorNotification.id ==
+                                  _copiedErrorNotificationId,
                           onSelect: _showErrorNotification,
                           onBack: () => setState(
                             () => _selectedErrorNotificationId = null,
@@ -3426,6 +3462,7 @@ class _ErrorNotificationPanel extends StatelessWidget {
   const _ErrorNotificationPanel({
     required this.notifications,
     required this.selectedNotification,
+    required this.selectedNotificationCopied,
     required this.onSelect,
     required this.onBack,
     required this.onMarkAllRead,
@@ -3437,6 +3474,7 @@ class _ErrorNotificationPanel extends StatelessWidget {
 
   final List<_AppErrorNotification> notifications;
   final _AppErrorNotification? selectedNotification;
+  final bool selectedNotificationCopied;
   final ValueChanged<String> onSelect;
   final VoidCallback onBack;
   final VoidCallback onMarkAllRead;
@@ -3487,7 +3525,7 @@ class _ErrorNotificationPanel extends StatelessWidget {
             ),
             _panelAction(
               tooltip: appText('Delete all notifications'),
-              icon: Icons.delete_outline,
+              icon: LucideIcons300.trash2,
               onPressed: onDeleteAll,
             ),
           ],
@@ -3608,7 +3646,7 @@ class _ErrorNotificationPanel extends StatelessWidget {
             ),
             _panelAction(
               tooltip: appText('Delete notification'),
-              icon: Icons.delete_outline,
+              icon: LucideIcons300.trash2,
               onPressed: onDeleteSelected,
             ),
           ],
@@ -3636,7 +3674,9 @@ class _ErrorNotificationPanel extends StatelessWidget {
               const SizedBox(width: 6),
               _panelAction(
                 tooltip: appText('Copy error details'),
-                icon: Icons.content_copy,
+                icon: selectedNotificationCopied
+                    ? LucideIcons300.check
+                    : LucideIcons300.copy,
                 onPressed: () => onCopy(notification.id),
               ),
             ],
@@ -3655,7 +3695,8 @@ class _ErrorNotificationPanel extends StatelessWidget {
       height: 44,
       child: Row(
         children: [
-          if (leading != null) leading,
+          if (leading != null)
+            Padding(padding: const EdgeInsets.only(left: 4), child: leading),
           Expanded(
             child: Padding(
               padding: EdgeInsets.only(left: leading == null ? 14 : 4),
@@ -3877,15 +3918,19 @@ class _GitHubCommitButtonState extends State<_GitHubCommitButton> {
       child: CompositedTransformTarget(
         link: _buttonLink,
         child: SizedBox(
-          width: 38,
+          width: 32,
           height: 36,
-          child: IconButton(
-            key: const ValueKey('github-commit-button'),
-            onPressed: () => unawaited(_openLatestCommit()),
-            color: const Color(0xFFB6BAC2),
-            iconSize: 18,
-            padding: EdgeInsets.zero,
-            icon: const FaIcon(FontAwesomeIcons.github, size: 18),
+          child: Center(
+            child: IconButton(
+              key: const ValueKey('github-commit-button'),
+              onPressed: () => unawaited(_openLatestCommit()),
+              color: const Color(0xFFB6BAC2),
+              iconSize: 18,
+              splashRadius: 16,
+              constraints: const BoxConstraints.tightFor(width: 32, height: 32),
+              padding: EdgeInsets.zero,
+              icon: const FaIcon(FontAwesomeIcons.github, size: 18),
+            ),
           ),
         ),
       ),
@@ -4304,23 +4349,30 @@ class _LinuxWindowTitleBarState extends State<_LinuxWindowTitleBar> {
                   onError: widget.onError,
                 ),
                 SizedBox(
-                  width: 38,
+                  width: 32,
                   height: 36,
                   child: Stack(
                     clipBehavior: Clip.none,
                     children: [
-                      IconButton(
-                        key: const ValueKey('error-notification-bell'),
-                        onPressed: widget.onNotificationsPressed,
-                        color: const Color(0xFFB6BAC2),
-                        iconSize: 18,
-                        padding: EdgeInsets.zero,
-                        icon: const Icon(Icons.notifications_none),
+                      Center(
+                        child: IconButton(
+                          key: const ValueKey('error-notification-bell'),
+                          onPressed: widget.onNotificationsPressed,
+                          color: const Color(0xFFB6BAC2),
+                          iconSize: 18,
+                          splashRadius: 16,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 32,
+                            height: 32,
+                          ),
+                          padding: EdgeInsets.zero,
+                          icon: const Icon(LucideIcons300.bell),
+                        ),
                       ),
                       if (widget.unreadNotificationCount > 0)
                         Positioned(
                           top: 2,
-                          right: 6,
+                          right: 2,
                           child: IgnorePointer(
                             child: Container(
                               key: const ValueKey('unread-notification-count'),
@@ -7046,6 +7098,7 @@ _ClarificationSummary? _completedClarificationSummary(
 class _ConversationView extends StatelessWidget {
   const _ConversationView({
     required this.messages,
+    required this.attachmentStorage,
     required this.linkPreviewService,
     required this.onOpenLink,
     required this.scrollController,
@@ -7080,6 +7133,7 @@ class _ConversationView extends StatelessWidget {
   });
 
   final List<ChatMessage> messages;
+  final AttachmentStorage attachmentStorage;
   final LinkPreviewService linkPreviewService;
   final Future<void> Function(String href) onOpenLink;
   final ScrollController scrollController;
@@ -7209,6 +7263,7 @@ class _ConversationView extends StatelessWidget {
                             child: _MessageRow(
                               key: ValueKey(message.id),
                               message: message,
+                              attachmentStorage: attachmentStorage,
                               clarificationSummary: clarificationSummary,
                               displayUserContent:
                                   _clarificationAnswerForDisplay(
@@ -8029,6 +8084,7 @@ class _MessageRow extends StatefulWidget {
   const _MessageRow({
     super.key,
     required this.message,
+    required this.attachmentStorage,
     required this.clarificationSummary,
     required this.displayUserContent,
     required this.linkPreviewService,
@@ -8066,6 +8122,7 @@ class _MessageRow extends StatefulWidget {
   });
 
   final ChatMessage message;
+  final AttachmentStorage attachmentStorage;
   final _ClarificationSummary? clarificationSummary;
   final String? displayUserContent;
   final LinkPreviewService linkPreviewService;
@@ -8137,6 +8194,7 @@ class _MessageRowState extends State<_MessageRow> {
   bool _isPickingEditAttachments = false;
   final _editController = _EmojiAwareTextEditingController();
   final List<ChatAttachment> _editAttachments = [];
+  final Map<String, ChatAttachment> _addedEditAttachments = {};
   final Map<String, Future<LinkPreview?>> _linkPreviews = {};
   Timer? _copyResetTimer;
 
@@ -8167,12 +8225,16 @@ class _MessageRowState extends State<_MessageRow> {
 
   @override
   void dispose() {
+    for (final attachment in _addedEditAttachments.values) {
+      unawaited(_deleteEditAttachment(attachment));
+    }
     _copyResetTimer?.cancel();
     _editController.dispose();
     super.dispose();
   }
 
   void _startEditing() {
+    _addedEditAttachments.clear();
     _editController.text = widget.message.content;
     _editAttachments
       ..clear()
@@ -8218,21 +8280,30 @@ class _MessageRowState extends State<_MessageRow> {
           );
           continue;
         }
-        added.add(
-          ChatAttachment(
-            id: _uuid.v4(),
-            path: filePath,
-            name: path.basename(filePath),
-            mimeType: attachmentMimeType(filePath),
-            expiresAtUtc: DateTime.now()
-                .toUtc()
-                .add(const Duration(hours: 24))
-                .millisecondsSinceEpoch,
-          ),
-        );
+        try {
+          added.add(await widget.attachmentStorage.copyFile(filePath));
+        } catch (error) {
+          _showToast(
+            context,
+            appText(
+              'Could not add attachment: {error}',
+              values: {'error': error},
+            ),
+            isError: true,
+          );
+        }
       }
       if (added.isNotEmpty) {
-        setState(() => _editAttachments.addAll(added));
+        if (!mounted) {
+          await _deleteEditAttachments(added);
+          return;
+        }
+        setState(() {
+          _editAttachments.addAll(added);
+          for (final attachment in added) {
+            _addedEditAttachments[attachment.id] = attachment;
+          }
+        });
       }
     } catch (error) {
       if (mounted) {
@@ -8263,7 +8334,48 @@ class _MessageRowState extends State<_MessageRow> {
       List<ChatAttachment>.unmodifiable(_editAttachments),
       !_ventMode,
     );
+    await _deleteEditAttachments(_addedEditAttachments.values.toList());
     if (mounted) setState(() => _isEditing = false);
+  }
+
+  void _removeEditAttachment(String id) {
+    final addedAttachment = _addedEditAttachments.remove(id);
+    setState(() => _editAttachments.removeWhere((item) => item.id == id));
+    if (addedAttachment != null) {
+      unawaited(_deleteEditAttachment(addedAttachment));
+    }
+  }
+
+  void _cancelEditing() {
+    setState(() => _isEditing = false);
+    unawaited(_deleteEditAttachments(_addedEditAttachments.values.toList()));
+  }
+
+  Future<void> _deleteEditAttachments(
+    Iterable<ChatAttachment> attachments,
+  ) async {
+    for (final attachment in attachments.toList()) {
+      _addedEditAttachments.remove(attachment.id);
+      await _deleteEditAttachment(attachment);
+    }
+  }
+
+  Future<void> _deleteEditAttachment(ChatAttachment attachment) async {
+    final filePath = attachment.path;
+    if (!attachment.isAppManagedCopy || filePath == null) return;
+    try {
+      await widget.attachmentStorage.deleteManagedFiles([filePath]);
+    } catch (error) {
+      final message = appText(
+        'Could not remove canceled attachment: {error}',
+        values: {'error': error},
+      );
+      if (mounted) {
+        _showToast(context, message, isError: true);
+      } else {
+        debugPrint(message);
+      }
+    }
   }
 
   Widget _buildInlineEditor(BuildContext context) {
@@ -8278,9 +8390,7 @@ class _MessageRowState extends State<_MessageRow> {
             constraints: const BoxConstraints(maxWidth: 480),
             child: _AttachmentGrid(
               attachments: _editAttachments,
-              onRemove: (id) => setState(
-                () => _editAttachments.removeWhere((item) => item.id == id),
-              ),
+              onRemove: _removeEditAttachment,
               onPreview: (attachment) =>
                   _openAttachmentPreview(context, attachment),
               compact: true,
@@ -8362,7 +8472,7 @@ class _MessageRowState extends State<_MessageRow> {
             const Spacer(),
             TextButton(
               key: ValueKey('cancel-edit-${widget.message.id}'),
-              onPressed: () => setState(() => _isEditing = false),
+              onPressed: _cancelEditing,
               child: Text(appText('Cancel')),
             ),
             const SizedBox(width: 6),
@@ -8450,7 +8560,7 @@ class _MessageRowState extends State<_MessageRow> {
                         tooltip: appText('Retry message'),
                         onPressed: widget.retryEnabled ? widget.onRetry : null,
                         icon: const Icon(LucideIcons300.refreshCw, size: 20),
-                        color: _accent,
+                        color: _muted,
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints.tightFor(
                           width: 26,
@@ -10522,6 +10632,7 @@ class _Composer extends StatefulWidget {
     required this.onStopTerminalCommand,
     this.clipboardImageReader,
     this.clipboardImageSaver,
+    required this.attachmentStorage,
     this.cameraSessionFactory,
     this.cameraImageSaver,
   });
@@ -10547,6 +10658,7 @@ class _Composer extends StatefulWidget {
   final VoidCallback onStopTerminalCommand;
   final Future<Uint8List?> Function()? clipboardImageReader;
   final Future<ChatAttachment> Function(Uint8List bytes)? clipboardImageSaver;
+  final AttachmentStorage attachmentStorage;
   final CameraSessionFactory? cameraSessionFactory;
   final Future<ChatAttachment> Function(Uint8List bytes)? cameraImageSaver;
 
@@ -10592,47 +10704,53 @@ class _ComposerState extends State<_Composer> {
         );
         continue;
       }
-      final attachment = _attachmentFromPath(filePath);
-      if (attachment == null) {
+      try {
+        selected.add(await widget.attachmentStorage.copyFile(filePath));
+      } catch (error) {
         _showAttachmentError(
           appText(
-            'Unsupported file format: {name}.',
-            values: {'name': path.basename(filePath)},
+            'Could not add attachment: {error}',
+            values: {'error': error},
           ),
         );
-        continue;
       }
-      selected.add(attachment);
     }
     _appendAttachments(selected);
   }
 
   void _appendAttachments(List<ChatAttachment> selected) {
-    if (!mounted || selected.isEmpty) return;
+    if (selected.isEmpty) return;
+    if (!mounted) {
+      for (final attachment in selected) {
+        unawaited(_deleteDraftAttachment(attachment));
+      }
+      return;
+    }
     final existingPaths = _attachments
         .map((item) => item.path)
         .whereType<String>()
         .toSet();
-    final additions = selected
-        .where((item) => item.path != null && existingPaths.add(item.path!))
-        .toList(growable: false);
+    final additions = <ChatAttachment>[];
+    final discarded = <ChatAttachment>[];
+    for (final attachment in selected) {
+      if (attachment.path != null && existingPaths.add(attachment.path!)) {
+        additions.add(attachment);
+      } else {
+        discarded.add(attachment);
+      }
+    }
     if (additions.isNotEmpty) {
       setState(() => _attachments.addAll(additions));
     }
+    for (final attachment in discarded) {
+      unawaited(_deleteDraftAttachment(attachment));
+    }
   }
 
-  ChatAttachment? _attachmentFromPath(String filePath) {
+  Future<ChatAttachment?> _attachmentFromPath(String filePath) async {
     if (isSensitiveAttachmentPath(filePath)) return null;
-    return ChatAttachment(
-      id: _uuid.v4(),
-      path: filePath,
-      name: path.basename(filePath),
-      mimeType: attachmentMimeType(filePath),
-      expiresAtUtc: DateTime.now()
-          .toUtc()
-          .add(const Duration(hours: 24))
-          .millisecondsSinceEpoch,
-    );
+    if (!File(filePath).existsSync()) return null;
+    return widget.attachmentStorage.copyFile(filePath);
   }
 
   Future<void> _pasteClipboardContent() async {
@@ -10643,7 +10761,7 @@ class _ComposerState extends State<_Composer> {
         final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
         final text = clipboardData?.text;
         if (text != null && text.isNotEmpty) {
-          _pasteTextOrFiles(text);
+          await _pasteTextOrFiles(text);
           return;
         }
 
@@ -10687,7 +10805,7 @@ class _ComposerState extends State<_Composer> {
         }
         final fileUri = await item.readValue(Formats.fileUri);
         if (fileUri?.scheme == 'file') {
-          final attachment = _attachmentFromPath(fileUri!.toFilePath());
+          final attachment = await _attachmentFromPath(fileUri!.toFilePath());
           if (attachment != null) {
             selected.add(attachment);
             continue;
@@ -10700,7 +10818,7 @@ class _ComposerState extends State<_Composer> {
             final uri = Uri.tryParse(value);
             final filePath = uri?.scheme == 'file' ? uri!.toFilePath() : value;
             if (File(filePath).existsSync()) {
-              final attachment = _attachmentFromPath(filePath);
+              final attachment = await _attachmentFromPath(filePath);
               if (attachment != null) selected.add(attachment);
             }
           }
@@ -10713,7 +10831,7 @@ class _ComposerState extends State<_Composer> {
       }
       if (!foundImage) {
         final text = await clipboard.readValue(Formats.plainText);
-        if (text != null) _pasteTextOrFiles(text);
+        if (text != null) await _pasteTextOrFiles(text);
       }
     } catch (error) {
       debugPrint('Could not read clipboard contents: $error');
@@ -10730,7 +10848,7 @@ class _ComposerState extends State<_Composer> {
     }
   }
 
-  void _pasteTextOrFiles(String text) {
+  Future<void> _pasteTextOrFiles(String text) async {
     final selected = <ChatAttachment>[];
     for (final line in text.split(RegExp(r'[\r\n]+'))) {
       final value = line.trim();
@@ -10738,7 +10856,7 @@ class _ComposerState extends State<_Composer> {
       final uri = Uri.tryParse(value);
       final filePath = uri?.scheme == 'file' ? uri!.toFilePath() : value;
       if (!File(filePath).existsSync()) continue;
-      final attachment = _attachmentFromPath(filePath);
+      final attachment = await _attachmentFromPath(filePath);
       if (attachment != null) selected.add(attachment);
     }
     if (selected.isNotEmpty) {
@@ -10749,53 +10867,16 @@ class _ComposerState extends State<_Composer> {
   }
 
   Future<ChatAttachment> _saveClipboardImage(Uint8List bytes) async {
-    return _saveAppManagedImage(
+    return widget.attachmentStorage.saveImageBytes(
       bytes,
       name: 'clipboard-image.png',
-      directoryName: 'clipboard-attachments',
-      expiresAtUtc: DateTime.now()
-          .toUtc()
-          .add(const Duration(hours: 24))
-          .millisecondsSinceEpoch,
     );
   }
 
   Future<ChatAttachment> _saveCameraImage(Uint8List bytes) async {
-    return _saveAppManagedImage(
+    return widget.attachmentStorage.saveImageBytes(
       bytes,
       name: 'camera-photo.png',
-      directoryName: 'camera-attachments',
-      inApplicationCache: true,
-    );
-  }
-
-  Future<ChatAttachment> _saveAppManagedImage(
-    Uint8List bytes, {
-    required String name,
-    required String directoryName,
-    int? expiresAtUtc,
-    bool inApplicationCache = false,
-  }) async {
-    final supportDirectory = inApplicationCache
-        ? await getApplicationCacheDirectory()
-        : await getApplicationSupportDirectory();
-    final directory = Directory(
-      path.join(supportDirectory.path, 'Sara', directoryName),
-    );
-    await directory.create(recursive: true);
-    final file = File(path.join(directory.path, '${_uuid.v4()}.png'));
-    final decodedImage = img.decodeImage(bytes);
-    if (decodedImage == null) {
-      throw StateError('Clipboard image could not be decoded.');
-    }
-    await file.writeAsBytes(img.encodePng(decodedImage), flush: true);
-    return ChatAttachment(
-      id: _uuid.v4(),
-      path: file.path,
-      name: name,
-      mimeType: 'image/png',
-      expiresAtUtc: expiresAtUtc,
-      isClipboardCopy: true,
     );
   }
 
@@ -10817,6 +10898,9 @@ class _ComposerState extends State<_Composer> {
 
   @override
   void dispose() {
+    for (final attachment in _attachments) {
+      unawaited(_deleteDraftAttachment(attachment));
+    }
     widget.controller.removeListener(_handleInputChanged);
     _attachmentMenu?.remove();
     _attachmentMenu = null;
@@ -10969,23 +11053,22 @@ class _ComposerState extends State<_Composer> {
           );
           continue;
         }
-        final attachment = _attachmentFromPath(filePath);
-        if (attachment == null) continue;
+        final mimeType = attachmentMimeType(filePath);
         if (mediaOnly &&
-            !attachment.mimeType.startsWith('image/') &&
-            !attachment.mimeType.startsWith('video/')) {
+            !mimeType.startsWith('image/') &&
+            !mimeType.startsWith('video/')) {
           continue;
         }
-        if (!File(filePath).existsSync()) {
+        try {
+          selected.add(await widget.attachmentStorage.copyFile(filePath));
+        } catch (error) {
           _showAttachmentError(
             appText(
-              'File not found: {name}',
-              values: {'name': pickedFile.name},
+              'Could not add attachment: {error}',
+              values: {'error': error},
             ),
           );
-          continue;
         }
-        selected.add(attachment);
       }
       _appendAttachments(selected);
     } catch (error) {
@@ -11032,7 +11115,29 @@ class _ComposerState extends State<_Composer> {
   }
 
   void _removeAttachment(String id) {
-    setState(() => _attachments.removeWhere((item) => item.id == id));
+    final index = _attachments.indexWhere((item) => item.id == id);
+    if (index < 0) return;
+    final removed = _attachments.removeAt(index);
+    setState(() {});
+    unawaited(_deleteDraftAttachment(removed));
+  }
+
+  Future<void> _deleteDraftAttachment(ChatAttachment attachment) async {
+    final filePath = attachment.path;
+    if (!attachment.isAppManagedCopy || filePath == null) return;
+    try {
+      await widget.attachmentStorage.deleteManagedFiles([filePath]);
+    } catch (error) {
+      final message = appText(
+        'Could not remove canceled attachment: {error}',
+        values: {'error': error},
+      );
+      if (mounted) {
+        _showAttachmentError(message);
+      } else {
+        debugPrint(message);
+      }
+    }
   }
 
   void _submitMessage() {

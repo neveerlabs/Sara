@@ -11,6 +11,7 @@ import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sara_desktop/ai_config_store.dart';
+import 'package:sara_desktop/attachment_storage.dart';
 import 'package:sara_desktop/chat_message.dart';
 import 'package:sara_desktop/chat_attachment.dart';
 import 'package:sara_desktop/camera_capture.dart';
@@ -26,6 +27,58 @@ import 'package:zxing_lib/src/barcode_format.dart';
 import 'package:zxing_lib/src/qrcode/qrcode_writer.dart';
 
 void main() {
+  test(
+    'attachments are copied to persistent Sara storage and expire',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'sara-attachment-storage-',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final supportDirectory = Directory(path.join(root.path, 'support'));
+      final storage = AttachmentStorage(
+        supportDirectoryProvider: () async => supportDirectory,
+      );
+      final expectedDirectory = path.join(
+        supportDirectory.path,
+        'Sara',
+        'attachments',
+      );
+      final clipboardImage = await storage.saveImageBytes(
+        Uint8List.fromList(img.encodePng(img.Image(width: 1, height: 1))),
+        name: 'clipboard-image.png',
+      );
+      expect(path.isWithin(expectedDirectory, clipboardImage.path!), isTrue);
+      expect(clipboardImage.mimeType, 'image/png');
+      expect(clipboardImage.isAppManagedCopy, isTrue);
+      final source = File(path.join(root.path, 'source.txt'));
+      await source.writeAsString('source contents');
+
+      final copied = await storage.copyFile(source.path);
+      expect(path.isWithin(expectedDirectory, copied.path!), isTrue);
+      expect(copied.isAppManagedCopy, isTrue);
+      expect(
+        copied.expiresAtUtc,
+        greaterThan(DateTime.now().toUtc().millisecondsSinceEpoch),
+      );
+      await source.delete();
+      expect(await File(copied.path!).readAsString(), 'source contents');
+
+      final orphanSource = File(path.join(root.path, 'orphan.txt'));
+      await orphanSource.writeAsString('orphan');
+      final orphan = await storage.copyFile(orphanSource.path);
+      await File(
+        orphan.path!,
+      ).setLastModified(DateTime.now().subtract(const Duration(hours: 25)));
+      await storage.deleteExpiredOrphans(
+        nowUtc: DateTime.now().toUtc().millisecondsSinceEpoch,
+        retainedPaths: {path.normalize(path.absolute(copied.path!))},
+      );
+      expect(await File(orphan.path!).exists(), isFalse);
+      expect(await File(copied.path!).exists(), isTrue);
+      expect(await orphanSource.exists(), isTrue);
+    },
+  );
+
   test(
     'local embedding mean pooling ignores padding and normalizes vectors',
     () {
@@ -3582,6 +3635,13 @@ void main() {
     );
     expect(restoredClipboard.path, isNot(clipboardFile.path));
     expect(restoredExternal.path, isNot(externalFile.path));
+    expect(
+      path.isWithin(
+        path.join(supportDirectory.path, 'Sara', 'attachments'),
+        restoredClipboard.path!,
+      ),
+      isTrue,
+    );
     expect(restoredClipboard.isClipboardCopy, isTrue);
     expect(restoredExternal.isClipboardCopy, isTrue);
     expect(await File(restoredClipboard.path!).readAsBytes(), [1, 2, 3]);

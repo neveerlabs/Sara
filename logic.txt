@@ -96,7 +96,7 @@ rather than described as though it had already been fixed.
   reactions and terminal activity in those messages, message embeddings,
   related topic summaries/embeddings, and any `active_child` relationships
   touching those messages.
-- Associated application-owned clipboard copies are also cleaned up. Original
+- Associated application-owned attachment copies are also cleaned up. Original
   files selected from the computer are not deleted.
 - Clearing the chat deletes all messages/branches, attachment metadata,
   embedding indexes, topic summaries, and branch selections. The name in the
@@ -119,17 +119,15 @@ rather than described as though it had already been fixed.
   message or file.
 
 6. Attachments, camera, and tools
-- Files from the file picker, drag-and-drop, or a file path in the clipboard are
-  stored as paths and metadata. The source file remains in its original
-  location; Sara does not delete it. An attachment path may expire after 24
-  hours and be removed from metadata without deleting the source file.
-- Images pasted from the clipboard are copied as PNG files to the application's
-  `Sara/clipboard-attachments` support folder, marked as application-owned
-  copies, and expire after 24 hours. These copies are deleted on expiry, message
-  deletion, or chat clearing.
-- Photos saved from the camera preview are kept in the application cache and
-  can be attached to a message. The camera cache is cleaned at startup/exit;
-  frames used directly by the camera tool are temporary and deleted after
+- Files from the file picker, drag-and-drop, file paths in the clipboard, pasted
+  images, and camera photos are copied to the application's persistent
+  `Sara/attachments` support folder. The source file remains in its original
+  location; Sara does not delete it.
+- Application-owned attachment copies expire after 24 hours and are removed
+  during cleanup. Canceling a draft attachment deletes its copy immediately;
+  orphaned files left by an interrupted session are removed after 24 hours.
+  Deleting a message or clearing the chat removes its application-owned copies.
+- Frames used directly by the camera tool are temporary and deleted after
   analysis.
 - Attachments on the latest user message are sent inline to Gemini if the file
   is available and its path is not considered sensitive. The total inline
@@ -275,7 +273,8 @@ rather than described as though it had already been fixed.
 
   `message_attachment`
   - `id`, `message_id`, `path`, `name`, `mime_type`, `expires_at_utc`,
-    `is_clipboard_copy`; composite primary key `(message_id, id)`.
+    `is_clipboard_copy` (the legacy column now marks any application-owned
+    copy); composite primary key `(message_id, id)`.
   - Stores metadata/paths, not file blobs themselves.
 
   `active_child`
@@ -386,10 +385,9 @@ rather than described as though it had already been fixed.
   or after five minutes idle. Backfilling older topic summaries remains a
   separate path that can send a Gemini request for each meaningful cluster.
 - If a reply request fails for an ordinary new message, the error path attempts
-  to delete the message and its attachment metadata from the database. This
-  path does not yet call the clipboard-copy cleanup routine; a copied file may
-  remain without a metadata row to trigger expiry cleanup. The user's source
-  file is not deleted.
+  to delete the message and its attachment metadata from the database. Any
+  resulting orphaned application-owned copies are removed by the 24-hour
+  attachment cleanup. The user's source file is not deleted.
 - Background handoffs are now keyed to the model reply ID (or the user message
   ID if there is no reply), rather than only to the user message ID. The next
   handoff selection also uses the active model reply from the previous

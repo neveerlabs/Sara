@@ -29,6 +29,7 @@ class SaraBackupService {
   Future<Uint8List> createBackup(MessageStore store) async {
     final tables = await store.exportBackupData();
     final clipboardDirectory = await _clipboardDirectoryPath();
+    final attachmentDirectory = await _attachmentDirectoryPath();
     final attachmentFiles = <String, Object?>{};
     final attachments = tables['message_attachment'];
     if (attachments is! List) {
@@ -42,9 +43,10 @@ class SaraBackupService {
       final filePath = attachment['path']! as String;
       final absoluteFilePath = path.normalize(path.absolute(filePath));
       if (attachment['is_clipboard_copy'] == 1 &&
+          !path.isWithin(attachmentDirectory, absoluteFilePath) &&
           !path.isWithin(clipboardDirectory, absoluteFilePath)) {
         throw StateError(
-          'Refusing to include a clipboard attachment outside Sara storage.',
+          'Refusing to include an app-managed attachment outside Sara storage.',
         );
       }
       final file = File(absoluteFilePath);
@@ -90,13 +92,13 @@ class SaraBackupService {
     }
 
     final existingAttachments = await store.loadAttachments();
-    final oldClipboardPaths = existingAttachments.values
+    final oldManagedPaths = existingAttachments.values
         .expand((items) => items)
-        .where((attachment) => attachment.isClipboardCopy)
+        .where((attachment) => attachment.isAppManagedCopy)
         .map((attachment) => attachment.path)
         .whereType<String>()
         .toSet();
-    final clipboardDirectory = await _clipboardDirectoryPath();
+    final attachmentDirectory = await _attachmentDirectoryPath();
     final restoredPaths = <String, String>{};
     final createdFiles = <File>[];
     final attachmentRows = tables['message_attachment'];
@@ -132,10 +134,10 @@ class SaraBackupService {
         );
       }
 
-      await Directory(clipboardDirectory).create(recursive: true);
+      await Directory(attachmentDirectory).create(recursive: true);
       for (final entry in decodedFiles.entries) {
         final file = File(
-          path.join(clipboardDirectory, '${_uuid.v4()}${entry.value.$1}'),
+          path.join(attachmentDirectory, '${_uuid.v4()}${entry.value.$1}'),
         );
         createdFiles.add(file);
         await file.writeAsBytes(entry.value.$2, flush: true);
@@ -162,9 +164,11 @@ class SaraBackupService {
     }
 
     final cleanupErrors = <String>[];
-    for (final oldPath in oldClipboardPaths) {
+    final legacyClipboardDirectory = await _clipboardDirectoryPath();
+    for (final oldPath in oldManagedPaths) {
       final absolutePath = path.normalize(path.absolute(oldPath));
-      if (!path.isWithin(clipboardDirectory, absolutePath)) {
+      if (!path.isWithin(attachmentDirectory, absolutePath) &&
+          !path.isWithin(legacyClipboardDirectory, absolutePath)) {
         cleanupErrors.add(
           '$oldPath: refusing to delete a file outside Sara storage',
         );
@@ -186,6 +190,13 @@ class SaraBackupService {
       path.absolute(
         path.join(supportDirectory.path, 'Sara', 'clipboard-attachments'),
       ),
+    );
+  }
+
+  Future<String> _attachmentDirectoryPath() async {
+    final supportDirectory = await _supportDirectoryProvider();
+    return path.normalize(
+      path.absolute(path.join(supportDirectory.path, 'Sara', 'attachments')),
     );
   }
 }

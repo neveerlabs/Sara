@@ -35,7 +35,7 @@ Conversation history is stored locally, and API keys are stored in the Linux `ke
 
 ## Notes
 
-* File/media attachments from the camera or clipboard are automatically deleted after 24 hours
+* Attachment files are copied to Sara's persistent app-data folder and automatically deleted after 24 hours; originals are never deleted.
 * API keys are stored in the Linux `keyring` (not in the database)
 * **Text to Speech** uses **Sound of Text**
 * The only AI provider is **Gemini**, using the `gemini-3.5-flash-lite` model

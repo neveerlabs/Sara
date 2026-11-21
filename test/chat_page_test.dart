@@ -19,7 +19,9 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sara_desktop/ai_config_store.dart';
 import 'package:sara_desktop/app_localizations.dart';
+import 'package:sara_desktop/attachment_file_policy.dart';
 import 'package:sara_desktop/chat_attachment.dart';
+import 'package:sara_desktop/attachment_storage.dart';
 import 'package:sara_desktop/chat_message.dart';
 import 'package:sara_desktop/camera_capture.dart';
 import 'package:sara_desktop/camera_capture_cache.dart';
@@ -1679,6 +1681,7 @@ void main() {
       _testApp(
         messageStore: _MemoryMessageStore(),
         replyService: _FakeReplyService(),
+        attachmentStorage: _FakeAttachmentStorage(),
       ),
     );
     await tester.pumpAndSettle();
@@ -1699,6 +1702,50 @@ void main() {
     );
     expect(tester.getSize(fileTile), const Size(224, 52));
     expect(find.text('logic.txt'), findsOneWidget);
+  });
+
+  testWidgets('canceling a composer attachment deletes its managed copy', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final filePath = '${Directory.current.path}/logic.txt';
+    final originalPlatform = FilePickerPlatform.instance;
+    FilePickerPlatform.instance = _FakeFilePickerPlatform([
+      _TestPlatformFile('logic.txt', filePath),
+    ]);
+    addTearDown(() => FilePickerPlatform.instance = originalPlatform);
+    final storage = _FakeAttachmentStorage(markCopiedAsManaged: true);
+
+    await tester.pumpWidget(
+      _testApp(
+        messageStore: _MemoryMessageStore(),
+        replyService: _FakeReplyService(),
+        attachmentStorage: storage,
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Add attachment'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('File'));
+    await tester.pumpAndSettle();
+
+    final removeButton = find.byWidgetPredicate(
+      (widget) =>
+          widget.key is ValueKey<String> &&
+          (widget.key! as ValueKey<String>).value.startsWith(
+            'remove-attachment-test-attachment-',
+          ),
+    );
+    await tester.tap(removeButton);
+    await tester.pumpAndSettle();
+
+    expect(find.text('logic.txt'), findsNothing);
+    expect(storage.deletedPaths, [filePath]);
+    expect(File(filePath).existsSync(), isTrue);
   });
 
   testWidgets('composer uses one file icon for supported and unknown files', (
@@ -2269,7 +2316,7 @@ void main() {
     expect(find.text('logic.txt'), findsOneWidget);
   });
 
-  testWidgets('dropping a file into the chat attaches its original path', (
+  testWidgets('dropping a file into the chat attaches a stored copy', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1280, 800);
@@ -2278,13 +2325,28 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
 
     final imageFile = File('${Directory.current.path}/assets/flutter_logo.png');
+    final storedImageFile = File(
+      '${Directory.systemTemp.path}/sara-drop-copy-flutter-logo.png',
+    );
+    await tester.runAsync(() async {
+      await imageFile.copy(storedImageFile.path);
+    });
+    addTearDown(() async {
+      if (await storedImageFile.exists()) await storedImageFile.delete();
+    });
     final messageStore = _MemoryMessageStore();
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     const codec = StandardMethodCodec();
 
     await tester.pumpWidget(
-      _testApp(messageStore: messageStore, replyService: _FakeReplyService()),
+      _testApp(
+        messageStore: messageStore,
+        replyService: _FakeReplyService(),
+        attachmentStorage: _FakeAttachmentStorage(
+          copiedPaths: {imageFile.path: storedImageFile.path},
+        ),
+      ),
     );
     await tester.pumpAndSettle();
 
@@ -2302,7 +2364,7 @@ void main() {
 
     expect(find.text('flutter_logo.png'), findsOneWidget);
     final attachedImage = tester.widget<Image>(find.byType(Image).last);
-    expect((attachedImage.image as FileImage).file.path, imageFile.path);
+    expect((attachedImage.image as FileImage).file.path, storedImageFile.path);
     expect(find.byKey(const ValueKey('room-file-drop-target')), findsOneWidget);
     expect(
       tester.getSize(find.byKey(const ValueKey('chat-composer'))).height,
@@ -4336,6 +4398,7 @@ void main() {
     final retryWidget = tester.widget<IconButton>(retryButton);
     expect(retryWidget.constraints!.maxWidth, 26);
     expect(retryWidget.style?.backgroundColor?.resolve({}), isNull);
+    expect(retryWidget.color, const Color(0xFF9AA3B2));
 
     replyService.error = null;
     await tester.tap(find.byTooltip('Retry message'));
@@ -4417,14 +4480,21 @@ void main() {
     final unreadBadge = tester.getRect(
       find.byKey(const ValueKey('unread-notification-count')),
     );
-    expect(
-      (unreadBadge.center.dx - notificationBell.center.dx).abs(),
-      lessThan(8),
-    );
+    expect(unreadBadge.center.dx - notificationBell.center.dx, greaterThan(5));
     await tester.tap(find.byKey(const ValueKey('error-notification-bell')));
     await tester.pumpAndSettle();
     expect(find.text('Notifications'), findsOneWidget);
     expect(find.text('2'), findsOneWidget);
+    final notificationPanel = find.byKey(
+      const ValueKey('error-notification-panel'),
+    );
+    expect(
+      find.descendant(
+        of: notificationPanel,
+        matching: find.byIcon(LucideIcons300.trash2),
+      ),
+      findsOneWidget,
+    );
     final dateLabels = find.byWidgetPredicate(
       (widget) =>
           widget is Text &&
@@ -4461,8 +4531,20 @@ void main() {
       ),
       findsOneWidget,
     );
-    final notificationPanel = find.byKey(
-      const ValueKey('error-notification-panel'),
+    expect(
+      find.descendant(
+        of: notificationPanel,
+        matching: find.byIcon(LucideIcons300.trash2),
+      ),
+      findsOneWidget,
+    );
+    final backButton = find.descendant(
+      of: notificationPanel,
+      matching: find.byTooltip('Back to notifications'),
+    );
+    expect(
+      tester.getRect(backButton).left - tester.getRect(notificationPanel).left,
+      greaterThanOrEqualTo(4),
     );
     expect(
       find.descendant(
@@ -4473,6 +4555,13 @@ void main() {
     );
     expect(tester.getSize(notificationPanel).height, lessThan(125));
     expect(find.text('1'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: notificationPanel,
+        matching: find.byIcon(LucideIcons300.copy),
+      ),
+      findsOneWidget,
+    );
     await tester.tap(
       find.descendant(
         of: notificationPanel,
@@ -4481,6 +4570,21 @@ void main() {
     );
     await tester.pump();
     expect(copiedError, contains('AI request failed: Bad state: test failure'));
+    expect(
+      find.descendant(
+        of: notificationPanel,
+        matching: find.byIcon(LucideIcons300.check),
+      ),
+      findsOneWidget,
+    );
+    await tester.pump(const Duration(milliseconds: 1200));
+    expect(
+      find.descendant(
+        of: notificationPanel,
+        matching: find.byIcon(LucideIcons300.copy),
+      ),
+      findsOneWidget,
+    );
     await tester.tap(
       find.descendant(
         of: notificationPanel,
@@ -4624,6 +4728,43 @@ void main() {
     expect(find.byKey(const ValueKey('linux-window-app-icon')), findsOneWidget);
     expect(
       find.byKey(const ValueKey('error-notification-bell')),
+      findsOneWidget,
+    );
+    final githubButtonRect = tester.getRect(
+      find.byKey(const ValueKey('github-commit-button')),
+    );
+    final notificationButtonRect = tester.getRect(
+      find.byKey(const ValueKey('error-notification-bell')),
+    );
+    expect(githubButtonRect.width, 32);
+    expect(githubButtonRect.height, lessThanOrEqualTo(36));
+    expect(notificationButtonRect.width, 32);
+    expect(notificationButtonRect.height, lessThanOrEqualTo(36));
+    expect(
+      (notificationButtonRect.center.dx - githubButtonRect.center.dx).abs(),
+      closeTo(32, 0.1),
+    );
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byKey(const ValueKey('github-commit-button')),
+          )
+          .splashRadius,
+      16,
+    );
+    expect(
+      tester
+          .widget<IconButton>(
+            find.byKey(const ValueKey('error-notification-bell')),
+          )
+          .splashRadius,
+      16,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('linux-window-title-bar')),
+        matching: find.byIcon(LucideIcons300.bell),
+      ),
       findsOneWidget,
     );
     expect(find.text('Sara'), findsOneWidget);
@@ -5208,6 +5349,7 @@ SaraApp _testApp({
   CameraSessionFactory? cameraSessionFactory,
   Future<ChatAttachment> Function(Uint8List bytes)? cameraImageSaver,
   Future<void> Function(MessageStore messageStore)? cameraCacheCleaner,
+  AttachmentStorage? attachmentStorage,
   DesktopNotificationService? notificationService,
   Future<void> Function(String assetPath)? notificationSoundPlayer,
   LinkPreviewService? linkPreviewService,
@@ -5225,6 +5367,7 @@ SaraApp _testApp({
     cameraSessionFactory: cameraSessionFactory,
     cameraImageSaver: cameraImageSaver,
     cameraCacheCleaner: cameraCacheCleaner ?? (_) async {},
+    attachmentStorage: attachmentStorage ?? _FakeAttachmentStorage(),
     notificationService:
         notificationService ?? const DesktopNotificationService(isLinux: false),
     notificationSoundPlayer: notificationSoundPlayer ?? (_) async {},
@@ -6021,4 +6164,58 @@ base class _TestPlatformFile extends PlatformFile {
 
   @override
   Stream<Uint8List> readAsByteStream() => const Stream.empty();
+}
+
+class _FakeAttachmentStorage extends AttachmentStorage {
+  _FakeAttachmentStorage({
+    this.copiedPaths = const {},
+    this.markCopiedAsManaged = false,
+    List<String>? deletedPaths,
+  }) : deletedPaths = deletedPaths ?? [],
+       super(supportDirectoryProvider: () async => Directory.systemTemp);
+
+  final Map<String, String> copiedPaths;
+  final bool markCopiedAsManaged;
+  final List<String> deletedPaths;
+  static var _nextId = 0;
+
+  @override
+  Future<ChatAttachment> copyFile(
+    String sourcePath, {
+    String? name,
+    String? mimeType,
+  }) async {
+    return ChatAttachment(
+      id: 'test-attachment-${_nextId++}',
+      path: copiedPaths[sourcePath] ?? sourcePath,
+      name: name ?? sourcePath.split('/').last,
+      mimeType: mimeType ?? attachmentMimeType(sourcePath),
+      isAppManagedCopy: markCopiedAsManaged,
+    );
+  }
+
+  @override
+  Future<void> deleteManagedFiles(Iterable<String> filePaths) async {
+    deletedPaths.addAll(filePaths);
+  }
+
+  @override
+  Future<ChatAttachment> saveImageBytes(
+    Uint8List bytes, {
+    required String name,
+  }) async {
+    return ChatAttachment(
+      id: 'test-image-${_nextId++}',
+      path: null,
+      name: name,
+      mimeType: 'image/png',
+      isAppManagedCopy: true,
+    );
+  }
+
+  @override
+  Future<void> deleteExpiredOrphans({
+    required int nowUtc,
+    required Set<String> retainedPaths,
+  }) async {}
 }
